@@ -1,6 +1,15 @@
-# Resource Statuses
+# Statuses
 
-## Statuses
+## Deployment Statuses
+
+| Status               | Meaning |
+|----------------------|---|
+| updating             | Deployment is updating to latest configuration |
+| updated              | Deployment is updated to latest configuration |
+| error                | Deployment has an error when updating to latest configuration,  |
+
+
+## Resource Statuses
 
 | Status               | Meaning |
 |----------------------|---|
