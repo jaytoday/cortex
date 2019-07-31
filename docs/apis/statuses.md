@@ -1,14 +1,5 @@
 # Statuses
 
-## Deployment Statuses
-
-| Status               | Meaning |
-|----------------------|---|
-| updating             | Deployment is updating to latest configuration |
-| updated              | Deployment is updated to latest configuration |
-| error                | Deployment has an error when updating to latest configuration,  |
-
-
 ## Resource Statuses
 
 | Status               | Meaning |
@@ -23,3 +14,11 @@
 | upstream error       | API was not created due to an error in one of its dependencies; a previous version of this API may be ready |
 | upstream termination | API was not created because one of its dependencies was terminated; a previous version of this API may be ready |
 | compute unavailable  | API could not start due to insufficient memory, CPU, or GPU in the cluster; some replicas may be ready |
+
+## Deployment Statuses
+
+| Status               | Meaning |
+|----------------------|---|
+| updating             | Deployment is updating to latest configuration |
+| updated              | Deployment is updated to latest configuration |
+| error                | Deployment is not completely updated to latest configuration due to an error; resources from the previous configuration may still be live |
