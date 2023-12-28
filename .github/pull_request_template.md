@@ -1,13 +1,12 @@
-Closes #<issue ID>
+closes #<issue ID>
 
 ---
-Checklist:
-- [ ] Run `make test` and `make lint`
-- [ ] Test end to end manually (e.g. build/push all images, restart operator, and run `cx refresh`)
-- [ ] Update examples
-- [ ] Update documentation (add any new files to `summary.md`)
-- [ ] Merge to master
-- [ ] Cherry-pick into release branches if it's a bugfix
-- [ ] Check [gitbook](https://docs.cortex.dev/v/master/) that docs look good and links function properly
-- [ ] Alert team if dev environment changed
-- [ ] Delete the branch once it's merged
+
+checklist:
+
+- [ ] run `make test` and `make lint`
+- [ ] test manually (i.e. build/push all images, restart operator, and re-deploy APIs)
+- [ ] update examples
+- [ ] update docs and add any new files to `summary.md` (view in [gitbook](https://cortex-labs.gitbook.io/staging/-MOmCGMADSRNQahK3Kox/) after merging)
+- [ ] cherry-pick into release branches if applicable
+- [ ] alert the dev team if the dev environment changed

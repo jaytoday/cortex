@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,118 +19,112 @@ package endpoints
 import (
 	"net/http"
 
-	"github.com/gorilla/websocket"
-
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
-	"github.com/cortexlabs/cortex/pkg/lib/slices"
-	"github.com/cortexlabs/cortex/pkg/operator/api/resource"
-	"github.com/cortexlabs/cortex/pkg/operator/workloads"
+	"github.com/cortexlabs/cortex/pkg/operator/operator"
+	"github.com/cortexlabs/cortex/pkg/operator/resources"
+	"github.com/cortexlabs/cortex/pkg/operator/resources/asyncapi"
+	"github.com/cortexlabs/cortex/pkg/operator/resources/realtimeapi"
+	"github.com/cortexlabs/cortex/pkg/operator/schema"
+	"github.com/cortexlabs/cortex/pkg/types/userconfig"
+	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
 
 func ReadLogs(w http.ResponseWriter, r *http.Request) {
-	appName, err := getRequiredQueryParam("appName", r)
+	apiName := mux.Vars(r)["apiName"]
+	jobID := getOptionalQParam("jobID", r)
+
+	if jobID != "" {
+		ReadJobLogs(w, r)
+		return
+	}
+
+	deployedResource, err := resources.GetDeployedResourceByName(apiName)
 	if err != nil {
-		RespondError(w, err)
+		respondError(w, r, err)
 		return
 	}
 
-	ctx := workloads.CurrentContext(appName)
-	if ctx == nil {
-		RespondError(w, ErrorAppNotDeployed(appName))
+	if deployedResource.Kind == userconfig.BatchAPIKind || deployedResource.Kind == userconfig.TaskAPIKind {
+		respondError(w, r, ErrorLogsJobIDRequired(*deployedResource))
+		return
+	} else if deployedResource.Kind != userconfig.RealtimeAPIKind && deployedResource.Kind != userconfig.AsyncAPIKind {
+		respondError(w, r, resources.ErrorOperationIsOnlySupportedForKind(*deployedResource, userconfig.RealtimeAPIKind))
 		return
 	}
 
-	verbose := getOptionalBoolQParam("verbose", false, r)
+	deploymentID := deployedResource.VirtualService.Labels["deploymentID"]
+	podID := deployedResource.VirtualService.Labels["podID"]
 
-	workloadID := getOptionalQParam("workloadID", r)
-	resourceID := getOptionalQParam("resourceID", r)
-	resourceName := getOptionalQParam("resourceName", r)
-	resourceType := getOptionalQParam("resourceType", r)
-
-	podLabels := map[string]string{
-		"appName":    appName,
-		"userFacing": "true",
-	}
-
-	if workloadID != "" {
-		podLabels["workloadID"] = workloadID
-		readLogs(w, r, podLabels, appName, verbose)
-		return
-	}
-
-	if resourceID != "" {
-		workloadID, err = workloads.GetLatestWorkloadID(resourceID, appName)
-		if err != nil {
-			RespondError(w, err)
-			return
-		}
-		if workloadID == "" {
-			RespondError(w, errors.Wrap(workloads.ErrorNotFound(), appName, "latest workload ID", resourceID))
-			return
-		}
-
-		podLabels["workloadID"] = workloadID
-		readLogs(w, r, podLabels, appName, verbose)
-		return
-	}
-
-	if resourceName == "" {
-		RespondError(w, ErrorAnyQueryParamRequired("workloadID", "resourceID", "resourceName"))
-		return
-	}
-
-	if resourceType != "" {
-		res, err := ctx.VisibleResourceByNameAndType(resourceName, resourceType)
-		if err != nil {
-			RespondError(w, err)
-			return
-		}
-		if res.GetResourceType() == resource.APIType {
-			podLabels["apiName"] = res.GetName()
-		} else {
-			podLabels["workloadID"] = res.GetWorkloadID()
-		}
-		readLogs(w, r, podLabels, appName, verbose)
-		return
-	}
-
-	res, err := ctx.VisibleResourceByName(resourceName)
-
-	if err == nil {
-		workloadID = res.GetWorkloadID()
-		if res.GetResourceType() == resource.APIType {
-			podLabels["apiName"] = res.GetName()
-		} else {
-			podLabels["workloadID"] = res.GetWorkloadID()
-		}
-		readLogs(w, r, podLabels, appName, verbose)
-		return
-	}
-
-	// Check for duplicate resources with same workload ID
-	var workloadIDs []string
-	for _, res := range ctx.VisibleResourcesByName(resourceName) {
-		workloadIDs = append(workloadIDs, res.GetWorkloadID())
-	}
-	workloadIDs = slices.UniqueStrings(workloadIDs)
-	if len(workloadIDs) == 1 {
-		podLabels["workloadID"] = workloadIDs[0]
-		readLogs(w, r, podLabels, appName, verbose)
-		return
-	}
-
-	RespondError(w, err)
-	return
-}
-
-func readLogs(w http.ResponseWriter, r *http.Request, podLabels map[string]string, appName string, verbose bool) {
 	upgrader := websocket.Upgrader{}
 	socket, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		RespondError(w, err)
+		respondError(w, r, err)
 		return
 	}
 	defer socket.Close()
 
-	workloads.ReadLogs(appName, podLabels, verbose, socket)
+	labels := map[string]string{"apiName": apiName, "deploymentID": deploymentID, "podID": podID}
+
+	operator.StreamLogsFromRandomPod(labels, socket)
+}
+
+func GetLogURL(w http.ResponseWriter, r *http.Request) {
+	apiName := mux.Vars(r)["apiName"]
+	jobID := getOptionalQParam("jobID", r)
+
+	if jobID != "" {
+		GetJobLogURL(w, r)
+		return
+	}
+
+	deployedResource, err := resources.GetDeployedResourceByName(apiName)
+	if err != nil {
+		respondError(w, r, err)
+		return
+	}
+
+	if deployedResource.Kind == userconfig.BatchAPIKind || deployedResource.Kind == userconfig.TaskAPIKind {
+		respondError(w, r, ErrorLogsJobIDRequired(*deployedResource))
+		return
+	}
+
+	switch deployedResource.Kind {
+	case userconfig.AsyncAPIKind:
+		apiResponse, err := asyncapi.GetAPIByName(deployedResource)
+		if err != nil {
+			respondError(w, r, err)
+			return
+		}
+		if apiResponse[0].Spec == nil {
+			respondError(w, r, errors.ErrorUnexpected("unable to get api spec", apiName))
+		}
+		logURL, err := operator.APILogURL(*apiResponse[0].Spec)
+		if err != nil {
+			respondError(w, r, err)
+			return
+		}
+		respondJSON(w, r, schema.LogResponse{
+			LogURL: logURL,
+		})
+	case userconfig.RealtimeAPIKind:
+		apiResponse, err := realtimeapi.GetAPIByName(deployedResource)
+		if err != nil {
+			respondError(w, r, err)
+			return
+		}
+		if apiResponse[0].Spec == nil {
+			respondError(w, r, errors.ErrorUnexpected("unable to get api spec", apiName))
+		}
+		logURL, err := operator.APILogURL(*apiResponse[0].Spec)
+		if err != nil {
+			respondError(w, r, err)
+			return
+		}
+		respondJSON(w, r, schema.LogResponse{
+			LogURL: logURL,
+		})
+	default:
+		respondError(w, r, resources.ErrorOperationIsOnlySupportedForKind(*deployedResource, userconfig.RealtimeAPIKind, userconfig.AsyncAPIKind))
+	}
 }

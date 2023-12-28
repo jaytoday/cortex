@@ -1,5 +1,5 @@
 ---
-name: Bug Report
+name: Bug report
 about: Report a bug
 title: ''
 labels: bug
@@ -7,50 +7,48 @@ assignees: ''
 
 ---
 
+### Version
+
+(use `cortex version` to determine your version)
+
 ### Description
 
-[Description of the bug]
+(describe the bug)
 
 ### Configuration
 
-[If applicable, any relevant resource configuration or the name of the example]
+(paste relevant `cortex.yaml` or `cluster.yaml` configuration)
 
-### To Reproduce
-
-[Minimal set of steps to reproduce the behavior]
+### Steps to reproduce
 
 1. ...
 2. ...
 3. ...
 
-### Actual Behavior
+### Expected behavior
 
-[Description of the actual behavior]
+(describe the behavior you expected)
 
-### Expected Behavior
+### Actual behavior
 
-[Description of the expected behavior]
+(describe the behavior you experienced)
 
 ### Screenshots
 
-[If applicable, any screenshots that show the issue]
+(optional)
 
-### Stack Trace
+### Stack traces
 
-[If applicable, the stack trace which shows the error. Find it with `cortex logs -v <resource name>`, or use `kubectl get pods -n cortex` and use the name of the failed pod in `kubectl logs <pod name> -n cortex`]
+(error output from CloudWatch Insights or from a random pod `cortex logs <api name>`)
 
+```text
+<paste stack traces here>
 ```
-<paste stack trace here>
-```
 
-### Version
+### Additional context
 
-[e.g. `0.2.2` or `master` (find with `cortex --version`)]
+(optional)
 
-### Additional Context
+### Suggested solution
 
-[If applicable, any other context about the problem]
-
-### Possible Solution / Implementation
-
-[Optional]
+(optional)

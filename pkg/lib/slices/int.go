@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,6 +16,10 @@ limitations under the License.
 
 package slices
 
+import (
+	s "github.com/cortexlabs/cortex/pkg/lib/strings"
+)
+
 func HasInt(list []int, query int) bool {
 	for _, elem := range list {
 		if elem == query {
@@ -29,29 +33,10 @@ func CopyInts(vals []int) []int {
 	return append(vals[:0:0], vals...)
 }
 
-func MinInt(vals ...int) int {
-	min := vals[0]
-	for _, val := range vals {
-		if val < min {
-			min = val
-		}
-	}
-	return min
-}
-
-func MaxInt(vals ...int) int {
-	max := vals[0]
-	for _, val := range vals {
-		if val > max {
-			max = val
-		}
-	}
-	return max
-}
-
-func AreNGreaterThanZero(minCount int, vals ...int) bool {
+func AreNGreaterThanZero(minCount int, val int, vals ...int) bool {
 	count := 0
-	for _, val := range vals {
+	allVals := append(vals, val)
+	for _, val := range allVals {
 		if val > 0 {
 			count++
 			if count >= minCount {
@@ -60,4 +45,12 @@ func AreNGreaterThanZero(minCount int, vals ...int) bool {
 		}
 	}
 	return false
+}
+
+func IntToString(vals []int) []string {
+	stringSlice := []string{}
+	for _, elem := range vals {
+		stringSlice = append(stringSlice, s.Int(elem))
+	}
+	return stringSlice
 }

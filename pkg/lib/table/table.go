@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,8 +21,10 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/cortexlabs/cortex/pkg/lib/console"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
-	"github.com/cortexlabs/cortex/pkg/lib/slices"
+	libmath "github.com/cortexlabs/cortex/pkg/lib/math"
+	"github.com/cortexlabs/cortex/pkg/lib/pointer"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
@@ -34,47 +36,95 @@ type Table struct {
 
 type Header struct {
 	Title    string
-	MaxWidth int // Max width of the text (not including spacing). Items that are longer will be truncated to less than MaxWidth to fit the elipses. If 0 is provided, it defaults to no max.
+	MaxWidth int // Max width of the text (not including spacing). Items that are longer will be truncated to less than MaxWidth to fit the ellipses. If 0 is provided, it defaults to no max.
 	MinWidth int // Min width of the text (not including spacing)
+	Hidden   bool
 }
 
-func validate(t Table) error {
-	numCols := len(t.Headers)
-
-	if numCols < 1 {
-		return errors.New("must have at least one column")
-	}
-
-	for _, header := range t.Headers {
-		if header.MaxWidth != 0 && len(header.Title) > header.MaxWidth {
-			return errors.New(fmt.Sprintf("header %s is wider than max width (%d)", header.Title, header.MaxWidth))
-		}
-
-		if header.MinWidth > header.MaxWidth {
-			return errors.New(fmt.Sprintf("header %s has min width > max width (%d > %d)", header.Title, header.MinWidth, header.MaxWidth))
-		}
-	}
-
-	for i, row := range t.Rows {
-		if len(row) != numCols {
-			return errors.New(fmt.Sprintf("row %d does not have the expected number of columns (%d)", i, numCols))
+func (t *Table) FindHeaderByTitle(title string) *Header {
+	for i, header := range t.Headers {
+		if header.Title == title {
+			return &t.Headers[i]
 		}
 	}
 
 	return nil
 }
 
+type Opts struct {
+	Sort       *bool // default is true
+	BoldHeader *bool // default is true
+}
+
+func mergeTableOptions(options ...*Opts) Opts {
+	mergedOpts := Opts{}
+
+	for _, opt := range options {
+		if opt != nil {
+			if opt.Sort != nil {
+				mergedOpts.Sort = opt.Sort
+			}
+
+			if opt.BoldHeader != nil {
+				mergedOpts.BoldHeader = opt.BoldHeader
+			}
+		}
+	}
+
+	if mergedOpts.Sort == nil {
+		mergedOpts.Sort = pointer.Bool(true)
+	}
+
+	if mergedOpts.BoldHeader == nil {
+		mergedOpts.BoldHeader = pointer.Bool(true)
+	}
+
+	return mergedOpts
+}
+
+func validate(t Table) error {
+	numCols := len(t.Headers)
+
+	if numCols < 1 {
+		return ErrorAtLeastOneColumn()
+	}
+
+	for _, header := range t.Headers {
+		if header.MaxWidth != 0 && len(header.Title) > header.MaxWidth {
+			return ErrorHeaderWiderThanMaxWidth(header.Title, header.MaxWidth)
+		}
+
+		if header.MinWidth > header.MaxWidth {
+			return ErrorHeaderMinWidthGreaterThanMaxWidth(header.Title, header.MinWidth, header.MaxWidth)
+		}
+	}
+
+	for i, row := range t.Rows {
+		if len(row) != numCols {
+			return ErrorWrongNumberOfColumns(i, len(row), numCols)
+		}
+	}
+
+	return nil
+}
+
+// Prints the error message as a string (if there is an error)
+func (t *Table) MustPrint(opts ...*Opts) {
+	fmt.Print(t.MustFormat(opts...))
+}
+
 // Return the error message as a string
-func MustFormat(t Table) string {
-	str, err := Format(t)
+func (t *Table) MustFormat(opts ...*Opts) string {
+	str, err := t.Format(opts...)
 	if err != nil {
-		return "error: " + err.Error()
+		return "error: " + errors.Message(err)
 	}
 	return str
 }
 
-func Format(t Table) (string, error) {
-	if err := validate(t); err != nil {
+func (t *Table) Format(opts ...*Opts) (string, error) {
+	mergedOpts := mergeTableOptions(opts...)
+	if err := validate(*t); err != nil {
 		return "", err
 	}
 
@@ -104,7 +154,7 @@ func Format(t Table) (string, error) {
 		if t.Headers[colNum].MaxWidth <= 0 {
 			maxColWidths[colNum] = colWidth
 		} else {
-			maxColWidths[colNum] = slices.MinInt(colWidth, t.Headers[colNum].MaxWidth)
+			maxColWidths[colNum] = libmath.MinInt(colWidth, t.Headers[colNum].MaxWidth)
 		}
 
 		if maxColWidths[colNum] < t.Headers[colNum].MinWidth {
@@ -116,34 +166,48 @@ func Format(t Table) (string, error) {
 
 	var headerStr string
 	for colNum, header := range t.Headers {
-		headerStr += header.Title
+		if header.Hidden {
+			continue
+		}
+
+		if *mergedOpts.BoldHeader {
+			headerStr += console.Bold(header.Title)
+		} else {
+			headerStr += header.Title
+		}
 		if colNum != lastColIndex {
 			headerStr += strings.Repeat(" ", maxColWidths[colNum]+t.Spacing-len(header.Title))
 		}
 	}
+	headerStr = s.TrimTrailingWhitespace(headerStr)
 
-	elipses := "..."
+	ellipses := "..."
 	rowStrs := make([]string, len(rows))
 	for rowNum, row := range rows {
 		var rowStr string
 		for colNum, val := range row {
+			if t.Headers[colNum].Hidden {
+				continue
+			}
 			if len(val) > maxColWidths[colNum] {
 				val = val[0:maxColWidths[colNum]]
-				// Ensure at least one space after elipses
-				for len(val)+len(elipses) > maxColWidths[colNum]+t.Spacing-1 {
+				// Ensure at least one space after ellipses
+				for len(val)+len(ellipses) > maxColWidths[colNum]+t.Spacing-1 {
 					val = val[0 : len(val)-1]
 				}
-				val += elipses
+				val += ellipses
 			}
 			rowStr += val
 			if colNum != lastColIndex {
 				rowStr += strings.Repeat(" ", maxColWidths[colNum]+t.Spacing-len(val))
 			}
 		}
-		rowStrs[rowNum] = rowStr
+		rowStrs[rowNum] = s.TrimTrailingWhitespace(rowStr)
 	}
 
-	sort.Strings(rowStrs)
+	if *mergedOpts.Sort {
+		sort.Strings(rowStrs)
+	}
 
-	return headerStr + "\n" + strings.Join(rowStrs, "\n"), nil
+	return headerStr + "\n" + strings.Join(rowStrs, "\n") + "\n", nil
 }

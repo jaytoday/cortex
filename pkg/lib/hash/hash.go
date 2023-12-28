@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package hash
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 
 	"github.com/cortexlabs/cortex/pkg/lib/files"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
@@ -34,6 +35,10 @@ func Bytes(bytes []byte) string {
 
 func String(str string) string {
 	return Bytes([]byte(str))
+}
+
+func Strings(strs ...string) string {
+	return String(strings.Join(strs, ","))
 }
 
 func Any(obj interface{}) string {

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,16 +17,20 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
+	"strings"
 
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type BoolPtrValidation struct {
-	Required          bool
-	Default           *bool
-	AllowExplicitNull bool
+	Required              bool
+	Default               *bool
+	AllowExplicitNull     bool
+	CantBeSpecifiedErrStr *string
+	StrToBool             map[string]bool // lowercase
 }
 
 func BoolPtr(inter interface{}, v *BoolPtrValidation) (*bool, error) {
@@ -76,6 +80,21 @@ func BoolPtrFromStr(valStr string, v *BoolPtrValidation) (*bool, error) {
 	if valStr == "" {
 		return ValidateBoolPtrMissing(v)
 	}
+
+	if len(v.StrToBool) > 0 {
+		casted, ok := v.StrToBool[strings.ToLower(valStr)]
+
+		if !ok {
+			keys := make([]string, 0, len(v.StrToBool))
+			for key := range v.StrToBool {
+				keys = append(keys, key)
+			}
+
+			return nil, ErrorInvalidStr(valStr, keys[0], keys[1:]...)
+		}
+		return ValidateBoolPtrProvided(&casted, v)
+	}
+
 	casted, castOk := s.ParseBool(valStr)
 	if !castOk {
 		return nil, ErrorInvalidPrimitiveType(valStr, PrimTypeBool)
@@ -100,15 +119,26 @@ func BoolPtrFromEnv(envVarName string, v *BoolPtrValidation) (*bool, error) {
 }
 
 func BoolPtrFromFile(filePath string, v *BoolPtrValidation) (*bool, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateBoolPtrMissing(v)
 		if err != nil {
 			return nil, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateBoolPtrMissing(v)
+		if err != nil {
+			return nil, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := BoolPtrFromStr(valStr, v)
 	if err != nil {
 		return nil, errors.Wrap(err, filePath)
@@ -124,8 +154,11 @@ func BoolPtrFromEnvOrFile(envVarName string, filePath string, v *BoolPtrValidati
 	return BoolPtrFromFile(filePath, v)
 }
 
-func BoolPtrFromPrompt(promptOpts *PromptOptions, v *BoolPtrValidation) (*bool, error) {
-	valStr := prompt(promptOpts)
+func BoolPtrFromPrompt(promptOpts *prompt.Options, v *BoolPtrValidation) (*bool, error) {
+	if v.Default != nil && promptOpts.DefaultStr == "" {
+		promptOpts.DefaultStr = s.Bool(*v.Default)
+	}
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateBoolPtrMissing(v)
 	}
@@ -140,8 +173,12 @@ func ValidateBoolPtrMissing(v *BoolPtrValidation) (*bool, error) {
 }
 
 func ValidateBoolPtrProvided(val *bool, v *BoolPtrValidation) (*bool, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return val, nil
 }

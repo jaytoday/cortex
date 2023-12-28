@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,17 +22,30 @@ import (
 )
 
 type BoolListValidation struct {
-	Required          bool
-	Default           []bool
-	AllowExplicitNull bool
-	AllowEmpty        bool
-	Validator         func([]bool) ([]bool, error)
+	Required              bool
+	Default               []bool
+	AllowExplicitNull     bool
+	AllowEmpty            bool
+	CantBeSpecifiedErrStr *string
+	CastSingleItem        bool
+	MinLength             int
+	MaxLength             int
+	InvalidLengths        []int
+	Validator             func([]bool) ([]bool, error)
 }
 
 func BoolList(inter interface{}, v *BoolListValidation) ([]bool, error) {
 	casted, castOk := cast.InterfaceToBoolSlice(inter)
 	if !castOk {
-		return nil, ErrorInvalidPrimitiveType(inter, PrimTypeBoolList)
+		if v.CastSingleItem {
+			castedItem, castOk := inter.(bool)
+			if !castOk {
+				return nil, ErrorInvalidPrimitiveType(inter, PrimTypeBool, PrimTypeBoolList)
+			}
+			casted = []bool{castedItem}
+		} else {
+			return nil, ErrorInvalidPrimitiveType(inter, PrimTypeBoolList)
+		}
 	}
 	return ValidateBoolListProvided(casted, v)
 }
@@ -61,8 +74,12 @@ func ValidateBoolListMissing(v *BoolListValidation) ([]bool, error) {
 }
 
 func ValidateBoolListProvided(val []bool, v *BoolListValidation) ([]bool, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return validateBoolList(val, v)
 }
@@ -71,6 +88,24 @@ func validateBoolList(val []bool, v *BoolListValidation) ([]bool, error) {
 	if !v.AllowEmpty {
 		if val != nil && len(val) == 0 {
 			return nil, ErrorCannotBeEmpty()
+		}
+	}
+
+	if v.MinLength != 0 {
+		if len(val) < v.MinLength {
+			return nil, ErrorTooFewElements(v.MinLength)
+		}
+	}
+
+	if v.MaxLength != 0 {
+		if len(val) > v.MaxLength {
+			return nil, ErrorTooManyElements(v.MaxLength)
+		}
+	}
+
+	for _, invalidLength := range v.InvalidLengths {
+		if len(val) == invalidLength {
+			return nil, ErrorWrongNumberOfElements(v.InvalidLengths)
 		}
 	}
 

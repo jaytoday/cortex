@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,14 +29,70 @@ func MatchAnyRegex(s string, regexes []*regexp.Regexp) bool {
 	return false
 }
 
-var alphaNumericDashDotUnderscoreRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-\.]+$`)
+var _leadingWhitespaceRegex = regexp.MustCompile(`^\s+`)
 
-func IsAlphaNumericDashDotUnderscore(s string) bool {
-	return alphaNumericDashDotUnderscoreRegex.MatchString(s)
+func HasLeadingWhitespace(s string) bool {
+	return _leadingWhitespaceRegex.MatchString(s)
 }
 
-var alphaNumericDashUnderscoreRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
+var _trailingWhitespaceRegex = regexp.MustCompile(`\s+$`)
+
+func HasTrailingWhitespace(s string) bool {
+	return _trailingWhitespaceRegex.MatchString(s)
+}
+
+// letters, numbers, spaces representable in UTF-8, and the following characters: _ . : / + - @
+// = is not supported because it doesn't propagate to the NLB correctly (via the k8s service annotation)
+var _awsTagRegex = regexp.MustCompile(`^[\sa-zA-Z0-9_\-\.:/+@]+$`)
+
+func IsValidAWSTag(s string) bool {
+	return _awsTagRegex.MatchString(s)
+}
+
+var _alphaNumericDashDotUnderscoreRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-\.]+$`)
+
+func IsAlphaNumericDashDotUnderscore(s string) bool {
+	return _alphaNumericDashDotUnderscoreRegex.MatchString(s)
+}
+
+var _alphaNumericDashUnderscoreRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-]+$`)
 
 func IsAlphaNumericDashUnderscore(s string) bool {
-	return alphaNumericDashUnderscoreRegex.MatchString(s)
+	return _alphaNumericDashUnderscoreRegex.MatchString(s)
+}
+
+var _alphaNumericDotUnderscoreRegex = regexp.MustCompile(`^[a-zA-Z0-9_\.]+$`)
+
+func IsAlphaNumericDotUnderscore(s string) bool {
+	return _alphaNumericDotUnderscoreRegex.MatchString(s)
+}
+
+var _alphaNumericDashRegex = regexp.MustCompile(`^[a-zA-Z0-9\-]+$`)
+
+func IsAlphaNumericDash(s string) bool {
+	return _alphaNumericDashRegex.MatchString(s)
+}
+
+// used the evaluated form of
+// https://github.com/docker/distribution/blob/3150937b9f2b1b5b096b2634d0e7c44d4a0f89fb/reference/regexp.go#L68-L70
+var _dockerValidImage = regexp.MustCompile(
+	`^((?:(?:[a-z0-9]|[a-z0-9][a-z0-9-]*[a-z0-9])` +
+		`(?:(?:\.(?:[a-z0-9]|[a-z0-9][a-z0-9-]*[a-z0-9]))+)` +
+		`?(?::[0-9]+)?/)?[a-z0-9]` +
+		`+(?:(?:(?:[._]|__|[-]*)[a-z0-9]+)+)` +
+		`?(?:(?:/[a-z0-9]+(?:(?:(?:[._]|__|[-]*)[a-z0-9]+)+)?)+)?)` +
+		`(?::([\w][\w.-]{0,127}))` +
+		`?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$`,
+)
+
+func IsValidDockerImage(s string) bool {
+	return _dockerValidImage.MatchString(s)
+}
+
+var _ecrPattern = regexp.MustCompile(
+	`(^[a-zA-Z0-9][a-zA-Z0-9-_]*)\.dkr\.ecr(\-fips)?\.([a-zA-Z0-9][a-zA-Z0-9-_]*)\.amazonaws\.com(\.cn)?`,
+)
+
+func IsValidECRURL(s string) bool {
+	return _ecrPattern.MatchString(s)
 }

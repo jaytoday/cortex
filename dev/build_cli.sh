@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2019 Cortex Labs, Inc.
+# Copyright 2022 Cortex Labs, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,6 +19,4 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. >/dev/null && pwd)"
 
-source $ROOT/dev/config/build.sh
-
-$ROOT/build/cli.sh
+$ROOT/build/cli.sh upload

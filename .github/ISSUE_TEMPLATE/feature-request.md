@@ -1,6 +1,6 @@
 ---
-name: Feature Request
-about: Suggest a feature
+name: Feature request
+about: Request a feature
 title: ''
 labels: enhancement
 assignees: ''
@@ -9,12 +9,12 @@ assignees: ''
 
 ### Description
 
-[A description of the feature]
+(describe the feature)
 
 ### Motivation
 
-[An explanation of how this will improve the product, what problem this will solve, and/or what the use case is]
+(how this will improve the product / what problem will this solve / what is the use case)
 
-### Additional Context
+### Additional context
 
-[Optional: Any relevant context, designs, notes, or resources]
+(optional)

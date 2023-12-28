@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,29 +19,18 @@ package endpoints
 import (
 	"net/http"
 
-	"github.com/cortexlabs/cortex/pkg/operator/api/schema"
-	"github.com/cortexlabs/cortex/pkg/operator/config"
-	"github.com/cortexlabs/cortex/pkg/operator/workloads"
+	"github.com/cortexlabs/cortex/pkg/operator/resources"
+	"github.com/gorilla/mux"
 )
 
 func Delete(w http.ResponseWriter, r *http.Request) {
-	config.Telemetry.ReportEvent("endpoint.delete")
-
-	appName, err := getRequiredQueryParam("appName", r)
-	if err != nil {
-		RespondError(w, err)
-		return
-	}
-
+	apiName := mux.Vars(r)["apiName"]
 	keepCache := getOptionalBoolQParam("keepCache", false, r)
 
-	wasDeployed := workloads.DeleteApp(appName, keepCache)
-
-	if !wasDeployed {
-		RespondError(w, ErrorAppNotDeployed(appName))
+	response, err := resources.DeleteAPI(apiName, keepCache)
+	if err != nil {
+		respondError(w, r, err)
 		return
 	}
-
-	response := schema.DeleteResponse{Message: ResDeploymentDeleted}
-	Respond(w, response)
+	respondJSON(w, r, response)
 }

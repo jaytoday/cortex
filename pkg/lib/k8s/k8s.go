@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,8 +21,13 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/random"
+	istioclient "istio.io/client-go/pkg/clientset/versioned"
+	istionetworkingclient "istio.io/client-go/pkg/clientset/versioned/typed/networking/v1beta1"
 	kresource "k8s.io/apimachinery/pkg/api/resource"
 	kmeta "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	kclientdynamic "k8s.io/client-go/dynamic"
 	kclientset "k8s.io/client-go/kubernetes"
 	kclientapps "k8s.io/client-go/kubernetes/typed/apps/v1"
@@ -34,41 +39,47 @@ import (
 	kclientrest "k8s.io/client-go/rest"
 	kclientcmd "k8s.io/client-go/tools/clientcmd"
 	kclienthomedir "k8s.io/client-go/util/homedir"
-
-	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var (
-	home         = kclienthomedir.HomeDir()
-	deletePolicy = kmeta.DeletePropagationBackground
-	deleteOpts   = &kmeta.DeleteOptions{
-		PropagationPolicy: &deletePolicy,
+	_home         = kclienthomedir.HomeDir()
+	_deletePolicy = kmeta.DeletePropagationBackground
+	_deleteOpts   = kmeta.DeleteOptions{
+		PropagationPolicy: &_deletePolicy,
 	}
 )
 
 type Client struct {
-	RestConfig       *kclientrest.Config
-	clientset        *kclientset.Clientset
-	dynamicClient    kclientdynamic.Interface
-	podClient        kclientcore.PodInterface
-	serviceClient    kclientcore.ServiceInterface
-	configMapClient  kclientcore.ConfigMapInterface
-	deploymentClient kclientapps.DeploymentInterface
-	jobClient        kclientbatch.JobInterface
-	ingressClient    kclientextensions.IngressInterface
-	hpaClient        kclientautoscaling.HorizontalPodAutoscalerInterface
-	Namespace        string
+	ctrl.Client
+	RestConfig           *kclientrest.Config
+	clientSet            *kclientset.Clientset
+	istioClientSet       *istioclient.Clientset
+	dynamicClient        kclientdynamic.Interface
+	podClient            kclientcore.PodInterface
+	nodeClient           kclientcore.NodeInterface
+	serviceClient        kclientcore.ServiceInterface
+	configMapClient      kclientcore.ConfigMapInterface
+	secretClient         kclientcore.SecretInterface
+	deploymentClient     kclientapps.DeploymentInterface
+	jobClient            kclientbatch.JobInterface
+	ingressClient        kclientextensions.IngressInterface
+	hpaClient            kclientautoscaling.HorizontalPodAutoscalerInterface
+	virtualServiceClient istionetworkingclient.VirtualServiceInterface
+	Namespace            string
 }
 
-func New(namespace string, inCluster bool) (*Client, error) {
+func New(namespace string, inCluster bool, restConfig *kclientrest.Config, scheme *runtime.Scheme) (*Client, error) {
 	var err error
 	client := &Client{
 		Namespace: namespace,
 	}
-	if inCluster {
+	if restConfig != nil {
+		client.RestConfig = restConfig
+	} else if inCluster {
 		client.RestConfig, err = kclientrest.InClusterConfig()
 	} else {
-		kubeConfig := path.Join(home, ".kube", "config")
+		kubeConfig := path.Join(_home, ".kube", "config")
 		client.RestConfig, err = kclientcmd.BuildConfigFromFlags("", kubeConfig)
 	}
 
@@ -76,7 +87,7 @@ func New(namespace string, inCluster bool) (*Client, error) {
 		return nil, errors.Wrap(err, "kubeconfig")
 	}
 
-	client.clientset, err = kclientset.NewForConfig(client.RestConfig)
+	client.clientSet, err = kclientset.NewForConfig(client.RestConfig)
 	if err != nil {
 		return nil, errors.Wrap(err, "kubeconfig")
 	}
@@ -86,14 +97,40 @@ func New(namespace string, inCluster bool) (*Client, error) {
 		return nil, errors.Wrap(err, "kubeconfig")
 	}
 
-	client.podClient = client.clientset.CoreV1().Pods(namespace)
-	client.serviceClient = client.clientset.CoreV1().Services(namespace)
-	client.configMapClient = client.clientset.CoreV1().ConfigMaps(namespace)
-	client.deploymentClient = client.clientset.AppsV1().Deployments(namespace)
-	client.jobClient = client.clientset.BatchV1().Jobs(namespace)
-	client.ingressClient = client.clientset.ExtensionsV1beta1().Ingresses(namespace)
-	client.hpaClient = client.clientset.AutoscalingV2beta2().HorizontalPodAutoscalers(namespace)
+	client.Client, err = ctrl.New(client.RestConfig, ctrl.Options{Scheme: scheme})
+	if err != nil {
+		return nil, errors.Wrap(err, "kubeconfig")
+	}
+
+	client.istioClientSet, err = istioclient.NewForConfig(client.RestConfig)
+	if err != nil {
+		return nil, errors.Wrap(err, "kubeconfig")
+	}
+	client.virtualServiceClient = client.istioClientSet.NetworkingV1beta1().VirtualServices(namespace)
+
+	client.podClient = client.clientSet.CoreV1().Pods(namespace)
+	client.nodeClient = client.clientSet.CoreV1().Nodes()
+	client.serviceClient = client.clientSet.CoreV1().Services(namespace)
+	client.configMapClient = client.clientSet.CoreV1().ConfigMaps(namespace)
+	client.secretClient = client.clientSet.CoreV1().Secrets(namespace)
+	client.deploymentClient = client.clientSet.AppsV1().Deployments(namespace)
+	client.jobClient = client.clientSet.BatchV1().Jobs(namespace)
+	client.ingressClient = client.clientSet.ExtensionsV1beta1().Ingresses(namespace)
+	client.hpaClient = client.clientSet.AutoscalingV2beta2().HorizontalPodAutoscalers(namespace)
 	return client, nil
+}
+
+func (c *Client) ClientSet() *kclientset.Clientset {
+	return c.clientSet
+}
+
+func (c *Client) IstioClientSet() *istioclient.Clientset {
+	return c.istioClientSet
+}
+
+// to be safe, k8s sometimes needs all characters to be lower case, and the first to be a letter
+func RandomName() string {
+	return random.LowercaseLetters(1) + random.LowercaseString(62)
 }
 
 // ValidName ensures name contains only lower case alphanumeric, '-', or '.'
@@ -132,15 +169,12 @@ func Mem(mem string) kresource.Quantity {
 	return kresource.MustParse(mem)
 }
 
-func LabelSelector(labels map[string]string) string {
-	if labels == nil {
+func LabelExistsSelector(labelKeys ...string) string {
+	if len(labelKeys) == 0 {
 		return ""
 	}
-	labelSelectorStr := ""
-	for key, value := range labels {
-		labelSelectorStr = labelSelectorStr + "," + key + "=" + value
-	}
-	return strings.TrimPrefix(labelSelectorStr, ",")
+
+	return strings.Join(labelKeys, ",")
 }
 
 func FieldSelectorNotIn(key string, values []string) string {

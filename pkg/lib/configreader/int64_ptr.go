@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,28 +17,33 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
-
 	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type Int64PtrValidation struct {
-	Required             bool
-	Default              *int64
-	AllowExplicitNull    bool
-	AllowedValues        []int64
-	GreaterThan          *int64
-	GreaterThanOrEqualTo *int64
-	LessThan             *int64
-	LessThanOrEqualTo    *int64
-	Validator            func(int64) (int64, error)
+	Required              bool
+	Default               *int64
+	AllowExplicitNull     bool
+	AllowedValues         []int64
+	HiddenAllowedValues   []int64 // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues      []int64
+	CantBeSpecifiedErrStr *string
+	GreaterThan           *int64
+	GreaterThanOrEqualTo  *int64
+	LessThan              *int64
+	LessThanOrEqualTo     *int64
+	Validator             func(int64) (int64, error)
 }
 
 func makeInt64ValValidation(v *Int64PtrValidation) *Int64Validation {
 	return &Int64Validation{
 		AllowedValues:        v.AllowedValues,
+		HiddenAllowedValues:  v.HiddenAllowedValues,
+		DisallowedValues:     v.DisallowedValues,
 		GreaterThan:          v.GreaterThan,
 		GreaterThanOrEqualTo: v.GreaterThanOrEqualTo,
 		LessThan:             v.LessThan,
@@ -117,15 +122,26 @@ func Int64PtrFromEnv(envVarName string, v *Int64PtrValidation) (*int64, error) {
 }
 
 func Int64PtrFromFile(filePath string, v *Int64PtrValidation) (*int64, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateInt64PtrMissing(v)
 		if err != nil {
 			return nil, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateInt64PtrMissing(v)
+		if err != nil {
+			return nil, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := Int64PtrFromStr(valStr, v)
 	if err != nil {
 		return nil, errors.Wrap(err, filePath)
@@ -141,8 +157,11 @@ func Int64PtrFromEnvOrFile(envVarName string, filePath string, v *Int64PtrValida
 	return Int64PtrFromFile(filePath, v)
 }
 
-func Int64PtrFromPrompt(promptOpts *PromptOptions, v *Int64PtrValidation) (*int64, error) {
-	valStr := prompt(promptOpts)
+func Int64PtrFromPrompt(promptOpts *prompt.Options, v *Int64PtrValidation) (*int64, error) {
+	if v.Default != nil && promptOpts.DefaultStr == "" {
+		promptOpts.DefaultStr = s.Int64(*v.Default)
+	}
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateInt64PtrMissing(v)
 	}
@@ -151,14 +170,18 @@ func Int64PtrFromPrompt(promptOpts *PromptOptions, v *Int64PtrValidation) (*int6
 
 func ValidateInt64PtrMissing(v *Int64PtrValidation) (*int64, error) {
 	if v.Required {
-		return nil, ErrorMustBeDefined()
+		return nil, ErrorMustBeDefined(v.AllowedValues)
 	}
 	return validateInt64Ptr(v.Default, v)
 }
 
 func ValidateInt64PtrProvided(val *int64, v *Int64PtrValidation) (*int64, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return validateInt64Ptr(val, v)
 }

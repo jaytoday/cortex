@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,14 +19,13 @@ package json
 import (
 	"bytes"
 	"encoding/json"
-	"os"
 	"path/filepath"
 
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
 	"github.com/cortexlabs/cortex/pkg/lib/files"
 )
 
-func Marshal(obj interface{}) ([]byte, error) {
+func MarshalIndent(obj interface{}) ([]byte, error) {
 	jsonBytes, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
 		return nil, errors.Wrap(err, errStrMarshalJSON)
@@ -34,8 +33,16 @@ func Marshal(obj interface{}) ([]byte, error) {
 	return jsonBytes, nil
 }
 
-func Unmarshal(data []byte, dst interface{}) error {
-	if err := json.Unmarshal(data, dst); err != nil {
+func Marshal(obj interface{}) ([]byte, error) {
+	jsonBytes, err := json.Marshal(obj)
+	if err != nil {
+		return nil, errors.Wrap(err, errStrMarshalJSON)
+	}
+	return jsonBytes, nil
+}
+
+func Unmarshal(jsonBytes []byte, dst interface{}) error {
+	if err := json.Unmarshal(jsonBytes, dst); err != nil {
 		return errors.Wrap(err, errStrUnmarshalJSON)
 	}
 	return nil
@@ -64,11 +71,11 @@ func WriteJSON(obj interface{}, outPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := files.MkdirAll(filepath.Dir(outPath), os.ModePerm); err != nil {
+	if err := files.CreateDir(filepath.Dir(outPath)); err != nil {
 		return err
 	}
 
-	if err := files.WriteFile(outPath, jsonBytes, 0644); err != nil {
+	if err := files.WriteFile(jsonBytes, outPath); err != nil {
 		return err
 	}
 	return nil
@@ -77,7 +84,7 @@ func WriteJSON(obj interface{}, outPath string) error {
 func Pretty(obj interface{}) (string, error) {
 	b, err := json.MarshalIndent(obj, "", "  ")
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err, errStrMarshalJSON)
 	}
 
 	return string(b), nil

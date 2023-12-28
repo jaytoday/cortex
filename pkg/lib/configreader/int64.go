@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,34 +17,42 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
-
 	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	"github.com/cortexlabs/cortex/pkg/lib/slices"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type Int64Validation struct {
-	Required             bool
-	Default              int64
-	AllowedValues        []int64
-	GreaterThan          *int64
-	GreaterThanOrEqualTo *int64
-	LessThan             *int64
-	LessThanOrEqualTo    *int64
-	Validator            func(int64) (int64, error)
+	Required              bool
+	Default               int64
+	TreatNullAsZero       bool // `<field>: ` and `<field>: null` will be read as `<field>: 0`
+	AllowedValues         []int64
+	HiddenAllowedValues   []int64 // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues      []int64
+	CantBeSpecifiedErrStr *string
+	GreaterThan           *int64
+	GreaterThanOrEqualTo  *int64
+	LessThan              *int64
+	LessThanOrEqualTo     *int64
+	Validator             func(int64) (int64, error)
 }
 
 func Int64(inter interface{}, v *Int64Validation) (int64, error) {
 	if inter == nil {
-		return 0, ErrorCannotBeNull()
+		if v.TreatNullAsZero {
+			return ValidateInt64Provided(0, v)
+		}
+		return 0, ErrorCannotBeNull(v.Required)
 	}
 	casted, castOk := cast.InterfaceToInt64(inter)
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(inter, PrimTypeInt)
 	}
-	return ValidateInt64(casted, v)
+	return ValidateInt64Provided(casted, v)
 }
 
 func Int64FromInterfaceMap(key string, iMap map[string]interface{}, v *Int64Validation) (int64, error) {
@@ -87,7 +95,7 @@ func Int64FromStr(valStr string, v *Int64Validation) (int64, error) {
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(valStr, PrimTypeInt)
 	}
-	return ValidateInt64(casted, v)
+	return ValidateInt64Provided(casted, v)
 }
 
 func Int64FromEnv(envVarName string, v *Int64Validation) (int64, error) {
@@ -107,15 +115,26 @@ func Int64FromEnv(envVarName string, v *Int64Validation) (int64, error) {
 }
 
 func Int64FromFile(filePath string, v *Int64Validation) (int64, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateInt64Missing(v)
 		if err != nil {
 			return 0, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return 0, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateInt64Missing(v)
+		if err != nil {
+			return 0, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := Int64FromStr(valStr, v)
 	if err != nil {
 		return 0, errors.Wrap(err, filePath)
@@ -131,9 +150,9 @@ func Int64FromEnvOrFile(envVarName string, filePath string, v *Int64Validation) 
 	return Int64FromFile(filePath, v)
 }
 
-func Int64FromPrompt(promptOpts *PromptOptions, v *Int64Validation) (int64, error) {
-	promptOpts.defaultStr = s.Int64(v.Default)
-	valStr := prompt(promptOpts)
+func Int64FromPrompt(promptOpts *prompt.Options, v *Int64Validation) (int64, error) {
+	promptOpts.DefaultStr = s.Int64(v.Default)
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateInt64Missing(v)
 	}
@@ -142,12 +161,19 @@ func Int64FromPrompt(promptOpts *PromptOptions, v *Int64Validation) (int64, erro
 
 func ValidateInt64Missing(v *Int64Validation) (int64, error) {
 	if v.Required {
-		return 0, ErrorMustBeDefined()
+		return 0, ErrorMustBeDefined(v.AllowedValues)
 	}
-	return ValidateInt64(v.Default, v)
+	return validateInt64(v.Default, v)
 }
 
-func ValidateInt64(val int64, v *Int64Validation) (int64, error) {
+func ValidateInt64Provided(val int64, v *Int64Validation) (int64, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return 0, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+	return validateInt64(val, v)
+}
+
+func validateInt64(val int64, v *Int64Validation) (int64, error) {
 	err := ValidateInt64Val(val, v)
 	if err != nil {
 		return 0, err
@@ -181,9 +207,15 @@ func ValidateInt64Val(val int64, v *Int64Validation) error {
 		}
 	}
 
-	if v.AllowedValues != nil {
-		if !slices.HasInt64(v.AllowedValues, val) {
-			return ErrorInvalidInt64(val, v.AllowedValues...)
+	if len(v.AllowedValues) > 0 {
+		if !slices.HasInt64(append(v.AllowedValues, v.HiddenAllowedValues...), val) {
+			return ErrorInvalidInt64(val, v.AllowedValues[0], v.AllowedValues[1:]...)
+		}
+	}
+
+	if len(v.DisallowedValues) > 0 {
+		if slices.HasInt64(v.DisallowedValues, val) {
+			return ErrorDisallowedValue(val)
 		}
 	}
 
@@ -197,7 +229,7 @@ func ValidateInt64Val(val int64, v *Int64Validation) error {
 func MustInt64FromEnv(envVarName string, v *Int64Validation) int64 {
 	val, err := Int64FromEnv(envVarName, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -205,7 +237,7 @@ func MustInt64FromEnv(envVarName string, v *Int64Validation) int64 {
 func MustInt64FromFile(filePath string, v *Int64Validation) int64 {
 	val, err := Int64FromFile(filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -213,7 +245,7 @@ func MustInt64FromFile(filePath string, v *Int64Validation) int64 {
 func MustInt64FromEnvOrFile(envVarName string, filePath string, v *Int64Validation) int64 {
 	val, err := Int64FromEnvOrFile(envVarName, filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }

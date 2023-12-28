@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package time
 import (
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -56,7 +57,7 @@ func CopyPtr(t *time.Time) *time.Time {
 	return &tCopy
 }
 
-func Difference(t1 *time.Time, t2 *time.Time) string {
+func DifferenceStr(t1 *time.Time, t2 *time.Time) string {
 	var duration time.Duration
 	if t1 == nil && t2 == nil {
 		return "-"
@@ -72,20 +73,20 @@ func Difference(t1 *time.Time, t2 *time.Time) string {
 	if durationSecs < 60 {
 		return strconv.Itoa(durationSecs) + "s"
 	} else if durationSecs < 3600 {
-		return strconv.Itoa(durationSecs/60) + "m"
+		return strconv.Itoa(durationSecs/60) + "m" + strconv.Itoa(durationSecs-durationSecs/60*60) + "s"
 	} else if durationSecs < 48*3600 {
-		return strconv.Itoa(durationSecs/3600) + "h"
+		return strconv.Itoa(durationSecs/3600) + "h" + strconv.Itoa((durationSecs-durationSecs/3600*3600)/60) + "m"
 	} else {
-		return strconv.Itoa(durationSecs/(24*3600)) + "d"
+		return strconv.Itoa(durationSecs/(24*3600)) + "d" + strconv.Itoa((durationSecs-durationSecs/(24*3600)*(24*3600))/3600) + "h"
 	}
 }
 
-func Since(t *time.Time) string {
+func SinceStr(t *time.Time) string {
 	if t == nil {
 		return "-"
 	}
 	now := time.Now()
-	return Difference(t, &now)
+	return DifferenceStr(t, &now)
 }
 
 func LocalTimestamp(t *time.Time) string {
@@ -106,6 +107,70 @@ func LocalHourNow() string {
 	return time.Now().Local().Format("3:04:05pm MST")
 }
 
-func OlderThanSeconds(t time.Time, secs float64) bool {
-	return time.Since(t).Seconds() > secs
+func MillisToTime(epochMillis int64) time.Time {
+	seconds := epochMillis / 1000
+	millis := epochMillis % 1000
+	return time.Unix(seconds, millis*int64(time.Millisecond))
+}
+
+func ToMillis(t time.Time) int64 {
+	return t.UnixNano() / int64(time.Millisecond)
+}
+
+type Timer struct {
+	names []string
+	start time.Time
+	last  time.Time
+}
+
+func StartTimer(names ...string) Timer {
+	return Timer{
+		names: names,
+		start: time.Now(),
+	}
+}
+
+func (t *Timer) Print(messages ...string) {
+	now := time.Now()
+
+	separator := ""
+	if len(t.names)+len(messages) > 0 {
+		separator = ": "
+	}
+
+	totalTime := fmt.Sprintf("%s total", now.Sub(t.start))
+
+	stepTime := ""
+	if !t.last.IsZero() {
+		stepTime = fmt.Sprintf("%s step, ", now.Sub(t.last))
+	}
+
+	fmt.Println(strings.Join(append(t.names, messages...), ": ") + separator + stepTime + totalTime)
+
+	t.last = now
+}
+
+func MustParseDuration(str string) time.Duration {
+	d, err := time.ParseDuration(str)
+	if err != nil {
+		panic(err)
+	}
+	return d
+}
+
+func MaxDuration(duration time.Duration, durations ...time.Duration) time.Duration {
+	max := duration
+	for _, d := range durations {
+		if d > max {
+			max = d
+		}
+	}
+
+	return max
+}
+
+func GetCurrentUTCDate() time.Time {
+	timestamp := time.Now().UTC()
+	year, month, day := timestamp.Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 }

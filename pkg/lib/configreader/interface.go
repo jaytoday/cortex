@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,20 +17,20 @@ limitations under the License.
 package configreader
 
 import (
-	"github.com/cortexlabs/yaml"
-
 	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
 	"github.com/cortexlabs/cortex/pkg/lib/maps"
 	"github.com/cortexlabs/cortex/pkg/lib/pointer"
 	"github.com/cortexlabs/cortex/pkg/lib/sets/strset"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
+	"github.com/cortexlabs/yaml"
 )
 
 type InterfaceValidation struct {
 	Required               bool
 	Default                interface{}
 	AllowExplicitNull      bool
+	CantBeSpecifiedErrStr  *string
 	AllowCortexResources   bool
 	RequireCortexResources bool
 	Validator              func(interface{}) (interface{}, error)
@@ -64,8 +64,12 @@ func ValidateInterfaceMissing(v *InterfaceValidation) (interface{}, error) {
 }
 
 func ValidateInterfaceProvided(val interface{}, v *InterfaceValidation) (interface{}, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return validateInterface(val, v)
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,34 +17,42 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
-
 	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	"github.com/cortexlabs/cortex/pkg/lib/slices"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type Float64Validation struct {
-	Required             bool
-	Default              float64
-	AllowedValues        []float64
-	GreaterThan          *float64
-	GreaterThanOrEqualTo *float64
-	LessThan             *float64
-	LessThanOrEqualTo    *float64
-	Validator            func(float64) (float64, error)
+	Required              bool
+	Default               float64
+	TreatNullAsZero       bool // `<field>: ` and `<field>: null` will be read as `<field>: 0.0`
+	AllowedValues         []float64
+	HiddenAllowedValues   []float64 // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues      []float64
+	CantBeSpecifiedErrStr *string
+	GreaterThan           *float64
+	GreaterThanOrEqualTo  *float64
+	LessThan              *float64
+	LessThanOrEqualTo     *float64
+	Validator             func(float64) (float64, error)
 }
 
 func Float64(inter interface{}, v *Float64Validation) (float64, error) {
 	if inter == nil {
-		return 0, ErrorCannotBeNull()
+		if v.TreatNullAsZero {
+			return ValidateFloat64Provided(0, v)
+		}
+		return 0, ErrorCannotBeNull(v.Required)
 	}
 	casted, castOk := cast.InterfaceToFloat64(inter)
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(inter, PrimTypeFloat)
 	}
-	return ValidateFloat64(casted, v)
+	return ValidateFloat64Provided(casted, v)
 }
 
 func Float64FromInterfaceMap(key string, iMap map[string]interface{}, v *Float64Validation) (float64, error) {
@@ -87,7 +95,7 @@ func Float64FromStr(valStr string, v *Float64Validation) (float64, error) {
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(valStr, PrimTypeFloat)
 	}
-	return ValidateFloat64(casted, v)
+	return ValidateFloat64Provided(casted, v)
 }
 
 func Float64FromEnv(envVarName string, v *Float64Validation) (float64, error) {
@@ -107,15 +115,26 @@ func Float64FromEnv(envVarName string, v *Float64Validation) (float64, error) {
 }
 
 func Float64FromFile(filePath string, v *Float64Validation) (float64, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateFloat64Missing(v)
 		if err != nil {
 			return 0, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return 0, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateFloat64Missing(v)
+		if err != nil {
+			return 0, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := Float64FromStr(valStr, v)
 	if err != nil {
 		return 0, errors.Wrap(err, filePath)
@@ -131,9 +150,9 @@ func Float64FromEnvOrFile(envVarName string, filePath string, v *Float64Validati
 	return Float64FromFile(filePath, v)
 }
 
-func Float64FromPrompt(promptOpts *PromptOptions, v *Float64Validation) (float64, error) {
-	promptOpts.defaultStr = s.Float64(v.Default)
-	valStr := prompt(promptOpts)
+func Float64FromPrompt(promptOpts *prompt.Options, v *Float64Validation) (float64, error) {
+	promptOpts.DefaultStr = s.Float64(v.Default)
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateFloat64Missing(v)
 	}
@@ -142,12 +161,19 @@ func Float64FromPrompt(promptOpts *PromptOptions, v *Float64Validation) (float64
 
 func ValidateFloat64Missing(v *Float64Validation) (float64, error) {
 	if v.Required {
-		return 0, ErrorMustBeDefined()
+		return 0, ErrorMustBeDefined(v.AllowedValues)
 	}
-	return ValidateFloat64(v.Default, v)
+	return validateFloat64(v.Default, v)
 }
 
-func ValidateFloat64(val float64, v *Float64Validation) (float64, error) {
+func ValidateFloat64Provided(val float64, v *Float64Validation) (float64, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return 0, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+	return validateFloat64(val, v)
+}
+
+func validateFloat64(val float64, v *Float64Validation) (float64, error) {
 	err := ValidateFloat64Val(val, v)
 	if err != nil {
 		return 0, err
@@ -181,9 +207,15 @@ func ValidateFloat64Val(val float64, v *Float64Validation) error {
 		}
 	}
 
-	if v.AllowedValues != nil {
-		if !slices.HasFloat64(v.AllowedValues, val) {
-			return ErrorInvalidFloat64(val, v.AllowedValues...)
+	if len(v.AllowedValues) > 0 {
+		if !slices.HasFloat64(append(v.AllowedValues, v.HiddenAllowedValues...), val) {
+			return ErrorInvalidFloat64(val, v.AllowedValues[0], v.AllowedValues[1:]...)
+		}
+	}
+
+	if len(v.DisallowedValues) > 0 {
+		if slices.HasFloat64(v.DisallowedValues, val) {
+			return ErrorDisallowedValue(val)
 		}
 	}
 
@@ -197,7 +229,7 @@ func ValidateFloat64Val(val float64, v *Float64Validation) error {
 func MustFloat64FromEnv(envVarName string, v *Float64Validation) float64 {
 	val, err := Float64FromEnv(envVarName, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -205,7 +237,7 @@ func MustFloat64FromEnv(envVarName string, v *Float64Validation) float64 {
 func MustFloat64FromFile(filePath string, v *Float64Validation) float64 {
 	val, err := Float64FromFile(filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -213,7 +245,7 @@ func MustFloat64FromFile(filePath string, v *Float64Validation) float64 {
 func MustFloat64FromEnvOrFile(envVarName string, filePath string, v *Float64Validation) float64 {
 	val, err := Float64FromEnvOrFile(envVarName, filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }

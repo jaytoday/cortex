@@ -1,87 +1,360 @@
 version: 2.1
 
+orbs:
+  slack: circleci/slack@4.2.0
+
 commands:
-  return-if-not-deployed-branch:
-    description: >-
-      Exit and succeed this build step if it should not deploy images to DockerHub / upload CLI to AWS
-    steps:
-      - run:
-          name: Exit build step if should not be deployed
-          command: |
-            if ! ([[ "$CIRCLE_BRANCH" =~ ^[0-9]\.[0-9]$ ]] || [[ "$CIRCLE_BRANCH" == "master" ]]); then
-              echo "Exiting build step for branch which should not be deployed ($CIRCLE_BRANCH)"
-              circleci step halt
-            fi
   install-go:
     steps:
       - run:
           name: Install Go
           command: |
-            wget https://dl.google.com/go/go1.12.6.linux-amd64.tar.gz
-            sudo tar -C /usr/local -xzf go1.12.6.linux-amd64.tar.gz
+            sudo rm -rf /usr/local/go
+            wget https://dl.google.com/go/go1.17.3.linux-amd64.tar.gz
+            sudo tar -C /usr/local -xzf go1.17.3.linux-amd64.tar.gz
             rm -rf go*.tar.gz
             echo 'export PATH=$PATH:/usr/local/go/bin' >> $BASH_ENV
             echo 'export PATH=$PATH:~/go/bin' >> $BASH_ENV
+            mkdir ~/go
+            echo 'export GOPATH=~/go' >> $BASH_ENV
+
+  quay-login:
+    description: Log Docker agent into Quay.io
+    steps:
+      - run:
+          name: Login to Quay
+          command: docker login -u=$QUAY_USERNAME -p=$QUAY_PASSWORD quay.io
 
 jobs:
-  test:
+  lint:
     docker:
-      - image: circleci/python:3.7.2-stretch
+      - image: cimg/python:3.7
+    resource_class: medium
     steps:
       - checkout
       - install-go
-      - run: go get -u -v golang.org/x/lint/golint
-      - run: sudo pip3 install black
+      - restore_cache:
+          keys:
+            - go-mod-v1-{{ checksum "go.sum" }}
+            - go-mod-v1-
+      - run:
+          name: Install Linting Tools
+          command: |
+            go get -u -v golang.org/x/lint/golint
+            go get -u -v github.com/kyoh86/looppointer/cmd/looppointer
+            pip3 install aiohttp black==20.8b1 click==8.0.4
       - run:
           name: Lint
           command: make lint
+          no_output_timeout: 20m
+      - save_cache:
+          key: go-mod-v1-{{ checksum "go.sum" }}
+          paths:
+            - "~/go/pkg/mod"
+
+  test:
+    machine:
+      image: ubuntu-2004:202201-02 # machine executor necessary to run go integration tests
+    resource_class: medium
+    steps:
+      - checkout
+      - install-go
+      - restore_cache:
+          keys:
+            - go-mod-v1-{{ checksum "go.sum" }}
+            - go-mod-v1-
+      - run:
+          name: Initialize Credentials
+          command: |
+            echo 'export AWS_ACCESS_KEY_ID=${TEST_AWS_ACCESS_KEY_ID}' >> $BASH_ENV
+            echo 'export AWS_SECRET_ACCESS_KEY=${TEST_AWS_SECRET_ACCESS_KEY}' >> $BASH_ENV
+      - run:
+          name: Generate Cluster Config
+          command: |
+            mkdir -p dev/config
+            cat \<< EOF > ./dev/config/cluster.yaml
+            cluster_name: cortex-nightly
+            region: us-east-1
+            node_groups:
+              - name: cpu
+                instance_type: m5.large
+                min_instances: 1
+                max_instances: 1
+            EOF
       - run:
           name: Go Tests
-          command: make test-go
-  test-release:
+          command: make test
+      - save_cache:
+          key: go-mod-v1-{{ checksum "go.sum" }}
+          paths:
+            - "~/go/pkg/mod"
+
+  build-and-upload-cli:
     docker:
-      - image: circleci/python:3.7.2-stretch
+      - image: cimg/python:3.7
+    resource_class: medium
+    steps:
+      - checkout
+      - install-go
+      - run: pip install awscli
+      - run: make ci-build-cli
+      - run: make ci-build-and-upload-cli
+
+  build-and-push-images-amd64:
+    machine:
+      image: ubuntu-2004:202101-01
+    resource_class: medium
     steps:
       - checkout
       - run:
-          name: Version Test
-          command: make find-missing-version
-  build-and-deploy:
+          name: Build CI Images (amd64)
+          command: make ci-build-images-amd64
+          no_output_timeout: 20m
+      - quay-login
+      - run:
+          name: Push CI Images (amd64)
+          command: make ci-push-images-amd64
+          no_output_timeout: 20m
+
+  build-and-push-images-arm64:
+    machine:
+      image: ubuntu-2004:202201-02
+    resource_class: arm.medium
+    steps:
+      - checkout
+      - run:
+          name: Build CI Images (arm64)
+          command: make ci-build-images-arm64
+          no_output_timeout: 20m
+      - quay-login
+      - run:
+          name: Push CI Images (arm64)
+          command: make ci-push-images-arm64
+          no_output_timeout: 20m
+
+  amend-images:
     docker:
-      - image: circleci/python:3.7.2-stretch
+      - image: cimg/python:3.7
+    environment:
+      DOCKER_CLI_EXPERIMENTAL: enabled
+    resource_class: medium
     steps:
       - setup_remote_docker
-      - install-go
       - checkout
-      - run: make ci-build-images
-      - run: make ci-build-cli
-      - run: make test-python
-      - return-if-not-deployed-branch
-      - run: sudo pip3 install awscli
-      - run: make ci-push-images
-      - run: make ci-build-and-upload-cli
+      - quay-login
+      - run:
+          name: Amend CI Images
+          command: make ci-amend-images
+          no_output_timeout: 20m
+
+  cluster-up:
+    docker:
+      - image: cimg/python:3.7
+    steps:
+      - setup_remote_docker
+      - checkout
+      - run:
+          name: Install Dependencies
+          command: |
+            pip install boto3 pyyaml awscli
+            pip install https://s3-us-west-2.amazonaws.com/get-cortex/master/python/cortex-master.tar.gz
+      - run:
+          name: Initialize Credentials
+          command: |
+            echo 'export AWS_ACCESS_KEY_ID=${NIGHTLY_AWS_ACCESS_KEY_ID}' >> $BASH_ENV
+            echo 'export AWS_SECRET_ACCESS_KEY=${NIGHTLY_AWS_SECRET_ACCESS_KEY}' >> $BASH_ENV
+      - run:
+          name: Generate Cluster Config
+          # using a variety of node groups to test the multi-instance-type cluster functionality
+          command: |
+            cat \<< EOF > ./cluster.yaml
+            cluster_name: cortex-nightly
+            region: us-east-1
+            node_groups:
+              - name: spot
+                instance_type: t3.medium
+                min_instances: 16
+                max_instances: 16
+                spot: true
+              - name: cpu
+                instance_type: c5.xlarge
+                min_instances: 1
+                max_instances: 2
+              - name: gpu
+                instance_type: g4dn.xlarge
+                min_instances: 1
+                max_instances: 2
+              - name: inferentia
+                instance_type: inf1.xlarge
+                min_instances: 1
+                max_instances: 2
+              - name: arm
+                instance_type: a1.large
+                min_instances: 1
+                max_instances: 2
+            EOF
+      - run:
+          name: Create/Update AWS User policy
+          command: python ./dev/create_user.py cortex-nightly $NIGHTLY_AWS_ACCOUNT_ID us-east-1 > $BASH_ENV
+      - run:
+          name: Wait for new keys to propagate in AWS
+          command: sleep 10
+      - run:
+          name: Verify configuration of credentials
+          command: aws sts get-caller-identity | jq ".Arn" | grep "dev-cortex-nightly-us-east-1"
+      - run:
+          name: Create Cluster
+          command: cortex cluster up cluster.yaml --configure-env cortex -y
+      - slack/notify:
+          event: fail
+          channel: "#builds"
+          template: basic_fail_1
+
+  e2e-tests:
+    docker:
+      - image: cimg/python:3.7
+    steps:
+      - checkout
+      - run:
+          name: Install Dependencies
+          command: |
+            pip install boto3 pyyaml awscli
+            pip install -e ./test/e2e
+            pip install https://s3-us-west-2.amazonaws.com/get-cortex/master/python/cortex-master.tar.gz
+      - run:
+          name: Initialize Credentials
+          command: |
+            echo 'export AWS_ACCESS_KEY_ID=${NIGHTLY_AWS_ACCESS_KEY_ID}' >> $BASH_ENV
+            echo 'export AWS_SECRET_ACCESS_KEY=${NIGHTLY_AWS_SECRET_ACCESS_KEY}' >> $BASH_ENV
+      - run:
+          name: Configure Cortex CLI
+          command: cortex env configure cortex --operator-endpoint $(python dev/get_operator_url.py cortex-nightly us-east-1)
+      - run:
+          name: Run E2E Tests
+          no_output_timeout: 30m
+          command: |
+            pytest -v test/e2e/tests --env cortex --x86-nodegroups spot,cpu,gpu,inferentia --arm-nodegroups arm --skip-autoscaling --skip-load --skip-long-running
+            pytest -v test/e2e/tests --env cortex --x86-nodegroups spot,cpu,gpu,inferentia -k test_autoscaling
+            pytest -v test/e2e/tests --env cortex --x86-nodegroups spot,cpu,gpu,inferentia -k test_load
+      - slack/notify:
+          event: fail
+          channel: "#builds"
+          template: basic_fail_1
+
+  cluster-down:
+    docker:
+      - image: cimg/python:3.7
+    steps:
+      - setup_remote_docker
+      - checkout
+      - run:
+          name: Install Dependencies
+          command: |
+            pip install boto3 pyyaml awscli
+            pip install https://s3-us-west-2.amazonaws.com/get-cortex/master/python/cortex-master.tar.gz
+      - run:
+          name: Initialize Credentials
+          command: |
+            echo 'export AWS_ACCESS_KEY_ID=${NIGHTLY_AWS_ACCESS_KEY_ID}' >> $BASH_ENV
+            echo 'export AWS_SECRET_ACCESS_KEY=${NIGHTLY_AWS_SECRET_ACCESS_KEY}' >> $BASH_ENV
+      - run:
+          name: Create/Update AWS User policy
+          command: python ./dev/create_user.py cortex-nightly $NIGHTLY_AWS_ACCOUNT_ID us-east-1 > $BASH_ENV
+      - run:
+          name: Wait for new keys to propagate in AWS
+          command: sleep 10
+      - run:
+          name: Verify configuration of credentials
+          command: aws sts get-caller-identity | jq ".Arn" | grep "dev-cortex-nightly-us-east-1"
+      - run:
+          name: Delete Cluster
+          command: cortex cluster down --name cortex-nightly --region us-east-1 -y
+          when: always
+      - slack/notify:
+          event: fail
+          channel: "#builds"
+          template: basic_fail_1
 
 workflows:
-  version: 2.1
   build:
     jobs:
+      - lint
       - test
-      - test-release:
-          filters:
-            branches:
-              only:
-                - /^[0-9]\.[0-9]$/
       - build-and-deploy-approval:
           type: approval
-          requires:
-            - test
-            - test-release
           filters:
             branches:
               only:
-                - /^[0-9]\.[0-9]$/
-      - build-and-deploy:
+                - /^[0-9]+\.[0-9]+$/
+      - build-and-upload-cli:
           requires:
+            - lint
             - test
-            - test-release
             - build-and-deploy-approval
+          filters:
+            branches:
+              only:
+                - master
+                - /^[0-9]+\.[0-9]+$/
+      - build-and-push-images-amd64:
+          requires:
+            - lint
+            - test
+            - build-and-deploy-approval
+          filters:
+            branches:
+              only:
+                - master
+                - /^[0-9]+\.[0-9]+$/
+      - build-and-push-images-arm64:
+          requires:
+            - lint
+            - test
+            - build-and-deploy-approval
+          filters:
+            branches:
+              only:
+                - master
+                - /^[0-9]+\.[0-9]+$/
+      - amend-images:
+          requires:
+            - build-and-push-images-amd64
+            - build-and-push-images-arm64
+          filters:
+            branches:
+              only:
+                - master
+                - /^[0-9]+\.[0-9]+$/
+
+  # nightly-cluster-up:
+  #   triggers:
+  #     - schedule:
+  #         cron: "0 0 * * *"
+  #         filters:
+  #           branches:
+  #             only:
+  #               - master
+  #   jobs:
+  #     - cluster-up
+
+  # nightly-e2e-tests:
+  #   triggers:
+  #     - schedule:
+  #         cron: "0 1 * * *"
+  #         filters:
+  #           branches:
+  #             only:
+  #               - master
+  #   jobs:
+  #     - e2e-tests
+
+  # nightly-cluster-down:
+  #   triggers:
+  #     - schedule:
+  #         cron: "0 2 * * *"
+  #         filters:
+  #           branches:
+  #             only:
+  #               - master
+  #   jobs:
+  #     - cluster-down

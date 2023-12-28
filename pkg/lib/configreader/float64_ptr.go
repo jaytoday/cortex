@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,28 +17,33 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
-
 	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type Float64PtrValidation struct {
-	Required             bool
-	Default              *float64
-	AllowExplicitNull    bool
-	AllowedValues        []float64
-	GreaterThan          *float64
-	GreaterThanOrEqualTo *float64
-	LessThan             *float64
-	LessThanOrEqualTo    *float64
-	Validator            func(float64) (float64, error)
+	Required              bool
+	Default               *float64
+	AllowExplicitNull     bool
+	AllowedValues         []float64
+	HiddenAllowedValues   []float64 // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues      []float64
+	CantBeSpecifiedErrStr *string
+	GreaterThan           *float64
+	GreaterThanOrEqualTo  *float64
+	LessThan              *float64
+	LessThanOrEqualTo     *float64
+	Validator             func(float64) (float64, error)
 }
 
 func makeFloat64ValValidation(v *Float64PtrValidation) *Float64Validation {
 	return &Float64Validation{
 		AllowedValues:        v.AllowedValues,
+		HiddenAllowedValues:  v.HiddenAllowedValues,
+		DisallowedValues:     v.DisallowedValues,
 		GreaterThan:          v.GreaterThan,
 		GreaterThanOrEqualTo: v.GreaterThanOrEqualTo,
 		LessThan:             v.LessThan,
@@ -117,15 +122,26 @@ func Float64PtrFromEnv(envVarName string, v *Float64PtrValidation) (*float64, er
 }
 
 func Float64PtrFromFile(filePath string, v *Float64PtrValidation) (*float64, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateFloat64PtrMissing(v)
 		if err != nil {
 			return nil, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateFloat64PtrMissing(v)
+		if err != nil {
+			return nil, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := Float64PtrFromStr(valStr, v)
 	if err != nil {
 		return nil, errors.Wrap(err, filePath)
@@ -141,8 +157,11 @@ func Float64PtrFromEnvOrFile(envVarName string, filePath string, v *Float64PtrVa
 	return Float64PtrFromFile(filePath, v)
 }
 
-func Float64PtrFromPrompt(promptOpts *PromptOptions, v *Float64PtrValidation) (*float64, error) {
-	valStr := prompt(promptOpts)
+func Float64PtrFromPrompt(promptOpts *prompt.Options, v *Float64PtrValidation) (*float64, error) {
+	if v.Default != nil && promptOpts.DefaultStr == "" {
+		promptOpts.DefaultStr = s.Float64(*v.Default)
+	}
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateFloat64PtrMissing(v)
 	}
@@ -151,14 +170,18 @@ func Float64PtrFromPrompt(promptOpts *PromptOptions, v *Float64PtrValidation) (*
 
 func ValidateFloat64PtrMissing(v *Float64PtrValidation) (*float64, error) {
 	if v.Required {
-		return nil, ErrorMustBeDefined()
+		return nil, ErrorMustBeDefined(v.AllowedValues)
 	}
 	return validateFloat64Ptr(v.Default, v)
 }
 
 func ValidateFloat64PtrProvided(val *float64, v *Float64PtrValidation) (*float64, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return validateFloat64Ptr(val, v)
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,160 +19,118 @@ package endpoints
 import (
 	"fmt"
 
+	"github.com/cortexlabs/cortex/pkg/lib/errors"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
+	"github.com/cortexlabs/cortex/pkg/operator/operator"
 )
-
-type ErrorKind int
 
 const (
-	ErrUnknown ErrorKind = iota
-	ErrAuthHeaderMissing
-	ErrAuthHeaderMalformed
-	ErrAuthAPIError
-	ErrAuthForbidden
-	ErrAppNotDeployed
-	ErrFormFileMustBeProvided
-	ErrQueryParamRequired
-	ErrPathParamRequired
-	ErrAnyQueryParamRequired
-	ErrAnyPathParamRequired
-	ErrPending
+	ErrAPIVersionMismatch     = "endpoints.api_version_mismatch"
+	ErrHeaderMissing          = "endpoints.header_missing"
+	ErrHeaderMalformed        = "endpoints.header_malformed"
+	ErrAuthAPIError           = "endpoints.auth_api_error"
+	ErrFormFileMustBeProvided = "endpoints.form_file_must_be_provided"
+	ErrAuthInvalid            = "endpoints.auth_invalid"
+	ErrAuthOtherAccount       = "endpoints.auth_other_account"
+	ErrQueryParamRequired     = "endpoints.query_param_required"
+	ErrPathParamRequired      = "endpoints.path_param_required"
+	ErrAnyQueryParamRequired  = "endpoints.any_query_param_required"
+	ErrAnyPathParamRequired   = "endpoints.any_path_param_required"
+	ErrLogsJobIDRequired      = "endpoints.logs_job_id_required"
 )
 
-var (
-	errorKinds = []string{
-		"err_unknown",
-		"err_auth_header_missing",
-		"err_auth_header_malformed",
-		"err_auth_api_error",
-		"err_auth_forbidden",
-		"err_app_not_deployed",
-		"err_form_file_must_be_provided",
-		"err_query_param_required",
-		"err_path_param_required",
-		"err_any_query_param_required",
-		"err_any_path_param_required",
-		"err_pending",
-	}
-)
-
-var _ = [1]int{}[int(ErrPending)-(len(errorKinds)-1)] // Ensure list length matches
-
-func (t ErrorKind) String() string {
-	return errorKinds[t]
+func ErrorAPIVersionMismatch(operatorVersion string, clientVersion string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrAPIVersionMismatch,
+		Message: fmt.Sprintf("your CLI version (%s) doesn't match your Cortex operator version (%s); please update your cluster by following the instructions at https://docs.cortexlabs.com, or update your CLI (pip install cortex==%s)", clientVersion, operatorVersion, operatorVersion),
+	})
 }
 
-// MarshalText satisfies TextMarshaler
-func (t ErrorKind) MarshalText() ([]byte, error) {
-	return []byte(t.String()), nil
+func ErrorHeaderMissing(header string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrHeaderMissing,
+		Message: fmt.Sprintf("missing %s header", header),
+	})
 }
 
-// UnmarshalText satisfies TextUnmarshaler
-func (t *ErrorKind) UnmarshalText(text []byte) error {
-	enum := string(text)
-	for i := 0; i < len(errorKinds); i++ {
-		if enum == errorKinds[i] {
-			*t = ErrorKind(i)
-			return nil
-		}
-	}
-
-	*t = ErrUnknown
-	return nil
+func ErrorAuthHeaderMissing(header, host, url string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrHeaderMissing,
+		Message: fmt.Sprintf("missing %s header", header),
+		Metadata: map[string]string{
+			"host": host,
+			"url":  url,
+		},
+	})
 }
 
-// UnmarshalBinary satisfies BinaryUnmarshaler
-// Needed for msgpack
-func (t *ErrorKind) UnmarshalBinary(data []byte) error {
-	return t.UnmarshalText(data)
-}
-
-// MarshalBinary satisfies BinaryMarshaler
-func (t ErrorKind) MarshalBinary() ([]byte, error) {
-	return []byte(t.String()), nil
-}
-
-type Error struct {
-	Kind    ErrorKind
-	message string
-}
-
-func (e Error) Error() string {
-	return e.message
-}
-
-func ErrorAuthHeaderMissing() error {
-	return Error{
-		Kind:    ErrAuthHeaderMissing,
-		message: "auth header missing",
-	}
-}
-
-func ErrorAuthHeaderMalformed() error {
-	return Error{
-		Kind:    ErrAuthHeaderMalformed,
-		message: "auth header malformed",
-	}
+func ErrorHeaderMalformed(header string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrHeaderMalformed,
+		Message: fmt.Sprintf("malformed %s header", header),
+	})
 }
 
 func ErrorAuthAPIError() error {
-	return Error{
+	return errors.WithStack(&errors.Error{
 		Kind:    ErrAuthAPIError,
-		message: "the operator is unable to verify user's credentials using AWS STS; export AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, and run `./cortex.sh update` to update the operator's AWS credentials",
-	}
+		Message: "the operator is unable to verify user's credentials using AWS STS; run `aws sts get-caller-identity` to view the credentials being used by the cortex client",
+	})
 }
 
-func ErrorAuthForbidden() error {
-	return Error{
-		Kind:    ErrAuthForbidden,
-		message: "invalid AWS credentials; run `cortex configure` to configure your CLI with credentials for any IAM user in the same AWS account as the operator",
-	}
+func ErrorAuthInvalid() error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrAuthInvalid,
+		Message: "invalid AWS credentials; run `aws sts get-caller-identity` to view the credentials being used by the cortex client",
+	})
 }
 
-func ErrorAppNotDeployed(appName string) error {
-	return Error{
-		Kind:    ErrAuthForbidden,
-		message: fmt.Sprintf("%s is not deployed", s.UserStr(appName)),
-	}
+func ErrorAuthOtherAccount() error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrAuthOtherAccount,
+		Message: "the AWS account associated with your CLI's AWS credentials differs from the AWS account associated with your cluster's AWS credentials; run `aws sts get-caller-identity` to view the credentials being used by the cortex client",
+	})
 }
 
 func ErrorFormFileMustBeProvided(fileName string) error {
-	return Error{
+	return errors.WithStack(&errors.Error{
 		Kind:    ErrFormFileMustBeProvided,
-		message: fmt.Sprintf("request form file %s must be provided", s.UserStr(fileName)),
-	}
+		Message: fmt.Sprintf("request form file %s must be provided", s.UserStr(fileName)),
+	})
 }
 func ErrorQueryParamRequired(param string) error {
-	return Error{
+	return errors.WithStack(&errors.Error{
 		Kind:    ErrQueryParamRequired,
-		message: fmt.Sprintf("query param required: %s", param),
-	}
+		Message: fmt.Sprintf("query param required: %s", param),
+	})
 }
 
 func ErrorPathParamRequired(param string) error {
-	return Error{
+	return errors.WithStack(&errors.Error{
 		Kind:    ErrPathParamRequired,
-		message: fmt.Sprintf("path param required: %s", param),
-	}
+		Message: fmt.Sprintf("path param required: %s", param),
+	})
 }
 
-func ErrorAnyQueryParamRequired(params ...string) error {
-	return Error{
+func ErrorAnyQueryParamRequired(param string, params ...string) error {
+	allParams := append([]string{param}, params...)
+	return errors.WithStack(&errors.Error{
 		Kind:    ErrAnyQueryParamRequired,
-		message: fmt.Sprintf("query params required: %s", s.UserStrsOr(params)),
-	}
+		Message: fmt.Sprintf("query params required: %s", s.UserStrsOr(allParams)),
+	})
 }
 
-func ErrorAnyPathParamRequired(params ...string) error {
-	return Error{
+func ErrorAnyPathParamRequired(param string, params ...string) error {
+	allParams := append([]string{param}, params...)
+	return errors.WithStack(&errors.Error{
 		Kind:    ErrAnyPathParamRequired,
-		message: fmt.Sprintf("path params required: %s", s.UserStrsOr(params)),
-	}
+		Message: fmt.Sprintf("path params required: %s", s.UserStrsOr(allParams)),
+	})
 }
 
-func ErrorPending() error {
-	return Error{
-		Kind:    ErrPending,
-		message: "pending",
-	}
+func ErrorLogsJobIDRequired(resource operator.DeployedResource) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrLogsJobIDRequired,
+		Message: fmt.Sprintf("job id is required for %s; you can get a list of latest job ids with `cortex get %s` and use `cortex logs %s JOB_ID` to get the logs", resource.UserString(), resource.Name, resource.Name),
+	})
 }

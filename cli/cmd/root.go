@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,174 +19,218 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/spf13/cobra"
-
-	"github.com/cortexlabs/cortex/pkg/consts"
+	"github.com/cortexlabs/cortex/cli/types/flags"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
-	"github.com/cortexlabs/cortex/pkg/lib/slices"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
-	libtime "github.com/cortexlabs/cortex/pkg/lib/time"
-	"github.com/cortexlabs/cortex/pkg/operator/api/resource"
+	"github.com/cortexlabs/cortex/pkg/lib/telemetry"
+	homedir "github.com/mitchellh/go-homedir"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
-var cmdStr string
+var (
+	_cmdStr string
 
-var flagEnv string
-var flagWatch bool
-var flagAppName string
-var flagVerbose bool
-var flagSummary bool
-var flagAllDeployments bool
+	_configFileExts = []string{"yaml", "yml"}
+	_flagVerbose    bool
+	_flagOutput     = flags.PrettyOutputType
 
-var configFileExts = []string{"yaml", "yml"}
+	_credentialsCacheDir string
+	_localDir            string
+	_cliConfigPath       string
+	_clientIDPath        string
+	_emailPath           string
+	_debugPath           string
+	_cwd                 string
+	_homeDir             string
+)
 
 func init() {
+	cwd, err := os.Getwd()
+	if err != nil {
+		err := errors.Wrap(err, "unable to determine current working directory")
+		exit.Error(err)
+	}
+	_cwd = s.EnsureSuffix(cwd, "/")
+
+	homeDir, err := homedir.Dir()
+	if err != nil {
+		err := errors.Wrap(err, "unable to determine home directory")
+		exit.Error(err)
+	}
+	_homeDir = s.EnsureSuffix(homeDir, "/")
+
+	_localDir = os.Getenv("CORTEX_CLI_CONFIG_DIR")
+	if _localDir != "" {
+		_localDir = files.UserRelToAbsPath(_localDir)
+	} else {
+		_localDir = filepath.Join(homeDir, ".cortex")
+	}
+
+	err = os.MkdirAll(_localDir, os.ModePerm)
+	if err != nil {
+		err := errors.Wrap(err, "unable to write to home directory", _localDir)
+		exit.Error(err)
+	}
+
+	// ~/.cortex/credentials/
+	_credentialsCacheDir = filepath.Join(_localDir, "credentials")
+	err = os.MkdirAll(_credentialsCacheDir, os.ModePerm)
+	if err != nil {
+		err := errors.Wrap(err, "unable to write to home directory", _localDir)
+		exit.Error(err)
+	}
+
+	_cliConfigPath = filepath.Join(_localDir, "cli.yaml")
+	_clientIDPath = filepath.Join(_localDir, "client-id.txt")
+	_emailPath = filepath.Join(_localDir, "email.txt")
+	_debugPath = filepath.Join(_localDir, "cortex-debug.tgz")
+
 	cobra.EnablePrefixMatching = true
 
-	cmdStr = "cortex"
+	_cmdStr = "cortex"
 	for _, arg := range os.Args[1:] {
 		if arg == "-w" || arg == "--watch" {
 			continue
 		}
-		cmdStr += " " + arg
+		_cmdStr += " " + arg
 	}
+
+	enableTelemetry, err := readTelemetryConfig()
+	if err != nil {
+		exit.Error(err)
+	}
+	if enableTelemetry {
+		initTelemetry()
+	}
+
+	clusterInit()
+	completionInit()
+	deleteInit()
+	describeInit()
+	deployInit()
+	envInit()
+	getInit()
+	logsInit()
+	refreshInit()
+	versionInit()
 }
 
-var rootCmd = &cobra.Command{
+func initTelemetry() {
+	cID := clientID()
+
+	invoker := os.Getenv("CORTEX_CLI_INVOKER")
+	if invoker == "" {
+		invoker = "direct"
+	}
+
+	telemetry.Init(telemetry.Config{
+		Enabled: true,
+		UserID:  cID,
+		Properties: map[string]string{
+			"client_id": cID,
+			"invoker":   invoker,
+		},
+		Environment: "cli",
+		LogErrors:   false,
+		BackoffMode: telemetry.NoBackoff,
+	})
+}
+
+var _rootCmd = &cobra.Command{
 	Use:     "cortex",
 	Aliases: []string{"cx"},
-	Short:   "machine learning infrastructure for developers",
-	Long:    "Machine learning infrastructure for developers",
-	Version: consts.CortexVersion,
+	Short:   "cost-effective serverless computing",
 }
 
 func Execute() {
-	defer errors.RecoverAndExit()
-	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
+	defer exit.RecoverAndExit()
+
 	cobra.EnableCommandSorting = false
 
-	rootCmd.AddCommand(deployCmd)
-	rootCmd.AddCommand(getCmd)
-	rootCmd.AddCommand(logsCmd)
-	rootCmd.AddCommand(refreshCmd)
-	rootCmd.AddCommand(predictCmd)
-	rootCmd.AddCommand(deleteCmd)
+	_rootCmd.AddCommand(_deployCmd)
+	_rootCmd.AddCommand(_getCmd)
+	_rootCmd.AddCommand(_describeCmd)
+	_rootCmd.AddCommand(_logsCmd)
+	_rootCmd.AddCommand(_refreshCmd)
+	_rootCmd.AddCommand(_deleteCmd)
 
-	rootCmd.AddCommand(configureCmd)
-	rootCmd.AddCommand(completionCmd)
+	_rootCmd.AddCommand(_clusterCmd)
 
-	rootCmd.Execute()
+	_rootCmd.AddCommand(_envCmd)
+	_rootCmd.AddCommand(_versionCmd)
+	_rootCmd.AddCommand(_completionCmd)
+
+	updateRootUsage()
+
+	_rootCmd.Execute()
+
+	exit.Ok()
 }
 
-func setConfigFlag(flagStr string, description string, flag *string, cmd *cobra.Command) {
-	cmd.PersistentFlags().StringVarP(flag, flagStr+"-config", "", "", description)
-	cmd.PersistentFlags().SetAnnotation(flagStr+"-config", cobra.BashCompFilenameExt, configFileExts)
-}
+func updateRootUsage() {
+	defaultUsageFunc := _rootCmd.UsageFunc()
+	usage := _rootCmd.UsageString()
 
-func addEnvFlag(cmd *cobra.Command) {
-	cmd.PersistentFlags().StringVarP(&flagEnv, "env", "e", "dev", "environment")
-}
+	_rootCmd.SetUsageFunc(func(cmd *cobra.Command) error {
+		if cmd != _rootCmd {
+			return defaultUsageFunc(cmd)
+		}
 
-func addWatchFlag(cmd *cobra.Command) {
-	cmd.PersistentFlags().BoolVarP(&flagWatch, "watch", "w", false, "re-run the command every second")
-}
+		usage = strings.Replace(usage, "Usage:\n  cortex [command]\n\nAliases:\n  cortex, cx\n\n", "", 1)
+		usage = strings.Replace(usage, "Available Commands:", "api commands:", 1)
+		usage = strings.Replace(usage, "\n  cluster", "\n\ncluster commands:\n  cluster", 1)
+		usage = strings.Replace(usage, "\n  env ", "\n\nother commands:\n  env ", 1)
+		usage = strings.Replace(usage, "\n\nUse \"cortex [command] --help\" for more information about a command.", "", 1)
 
-func addAppNameFlag(cmd *cobra.Command) {
-	cmd.PersistentFlags().StringVarP(&flagAppName, "deployment", "d", "", "deployment name")
+		cmd.Print(usage)
+
+		return nil
+	})
 }
 
 func addVerboseFlag(cmd *cobra.Command) {
-	cmd.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "show verbose output")
+	cmd.Flags().BoolVarP(&_flagVerbose, "verbose", "v", false, "show additional information (only applies to pretty output format)")
 }
 
-func addSummaryFlag(cmd *cobra.Command) {
-	cmd.PersistentFlags().BoolVarP(&flagSummary, "summary", "s", false, "show summarized output")
+func wasFlagProvided(cmd *cobra.Command, flagName string) bool {
+	flagWasProvided := false
+	cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+		if flag.Name == flagName && flag.Changed && flag.Value.String() != "" {
+			flagWasProvided = true
+		}
+	})
+
+	return flagWasProvided
 }
 
-func addAllDeploymentsFlag(cmd *cobra.Command) {
-	getCmd.PersistentFlags().BoolVarP(&flagAllDeployments, "all-deployments", "a", false, "list all deployments")
-}
-
-var resourceTypesHelp = fmt.Sprintf("\nResource Types:\n  %s\n", strings.Join(resource.VisibleTypes.StringList(), "\n  "))
-
-func addResourceTypesToHelp(cmd *cobra.Command) {
-	usage := cmd.UsageTemplate()
-	usage = strings.Replace(usage, "\nFlags:\n", resourceTypesHelp+"\nFlags:\n", 1)
-	cmd.SetUsageTemplate(usage)
-}
-
-func getTerminalWidth() int {
-	cmd := exec.Command("stty", "size")
-	cmd.Stdin = os.Stdin
-	out, err := cmd.Output()
+func printEnvIfNotSpecified(envName string, cmd *cobra.Command) error {
+	out, err := envStringIfNotSpecified(envName, cmd)
 	if err != nil {
-		return 0
+		return err
 	}
-	dimensions := strings.Split(strings.TrimSpace(string(out)), " ")
-	if len(dimensions) != 2 {
-		return 0
+
+	if out != "" {
+		fmt.Print(out)
 	}
-	widthStr := dimensions[1]
-	width, ok := s.ParseInt(widthStr)
-	if !ok {
-		return 0
-	}
-	return width
+
+	return nil
 }
 
-func watchHeader() string {
-	timeStr := libtime.LocalHourNow()
-	width := getTerminalWidth()
-	numExtraChars := 4
-	padding := strings.Repeat(" ", slices.MaxInt(width-len(cmdStr)-len(timeStr)-numExtraChars, 0))
-	return fmt.Sprintf("$ %s  %s%s", cmdStr, padding, libtime.LocalHourNow())
-}
-
-func rerun(f func() (string, error)) {
-	if flagWatch {
-		print("\033[H\033[2J") // clear the screen
-
-		prevLines := 0
-		nextLines := 0
-
-		for true {
-			str, err := f()
-			if err != nil {
-				fmt.Println()
-				errors.Exit(err)
-			}
-
-			str = watchHeader() + "\n" + str
-			str = strings.TrimRight(str, "\n") + "\n" // ensure a single new line at the end
-			strSlice := strings.Split(str, "\n")
-			nextLines = len(strSlice)
-
-			for prevLines > nextLines {
-				fmt.Printf("\033[%dA\033[2K", 1) // move the cursor up and clear the line
-				prevLines--
-			}
-
-			for i := 0; i < prevLines; i++ {
-				fmt.Printf("\033[%dA", 1) // move the cursor up
-			}
-
-			prevLines = nextLines
-
-			for _, strLine := range strSlice {
-				fmt.Printf("\033[2K%s\n", strLine) // clear the line and print the new line
-			}
-
-			time.Sleep(time.Second)
-		}
-	} else {
-		str, err := f()
-		if err != nil {
-			errors.Exit(err)
-		}
-		fmt.Println(str)
+func envStringIfNotSpecified(envName string, cmd *cobra.Command) (string, error) {
+	envNames, err := listConfiguredEnvNames()
+	if err != nil {
+		return "", err
 	}
+
+	if _flagOutput == flags.PrettyOutputType && !wasFlagProvided(cmd, "env") && len(envNames) > 1 {
+		return fmt.Sprintf("using %s environment\n\n", envName), nil
+	}
+
+	return "", nil
 }

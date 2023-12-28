@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,21 +19,21 @@ package configreader
 import (
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cortexlabs/cortex/pkg/lib/aws"
+	"github.com/cortexlabs/cortex/pkg/lib/docker"
 	"github.com/cortexlabs/cortex/pkg/lib/files"
-	"github.com/cortexlabs/cortex/pkg/lib/urls"
 )
 
-var portRe *regexp.Regexp
+var _emailRegex *regexp.Regexp
 
 func init() {
-	portRe = regexp.MustCompile(`:[0-9]+$`)
+	_emailRegex = regexp.MustCompile("^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
 }
 
 func GetFilePathValidator(baseDir string) func(string) (string, error) {
 	return func(val string) (string, error) {
-		val = files.RelPath(val, baseDir)
 		if err := files.CheckFile(val); err != nil {
 			return "", err
 		}
@@ -42,51 +42,99 @@ func GetFilePathValidator(baseDir string) func(string) (string, error) {
 	}
 }
 
-func GetS3aPathValidator() func(string) (string, error) {
-	return func(val string) (string, error) {
-		if !aws.IsValidS3aPath(val) {
-			return "", aws.ErrorInvalidS3aPath(val)
-		}
-		return val, nil
+func S3aPathValidator(val string) (string, error) {
+	if !aws.IsValidS3aPath(val) {
+		return "", aws.ErrorInvalidS3aPath(val)
 	}
+	return val, nil
 }
 
-func GetS3PathValidator() func(string) (string, error) {
-	return func(val string) (string, error) {
-		if !aws.IsValidS3Path(val) {
-			return "", aws.ErrorInvalidS3Path(val)
-		}
-		return val, nil
+func S3PathValidator(val string) (string, error) {
+	if !aws.IsValidS3Path(val) {
+		return "", aws.ErrorInvalidS3Path(val)
 	}
+	return val, nil
 }
 
-// uses https unless defaultHTTP == true
-func GetURLValidator(defaultHTTP bool, addPort bool) func(string) (string, error) {
-	return func(val string) (string, error) {
-		urlStr := strings.TrimSpace(val)
+func EmailValidator(val string) (string, error) {
+	if len(val) > 320 {
+		return "", ErrorEmailTooLong()
+	}
 
-		if !strings.HasPrefix(strings.ToLower(urlStr), "http") {
-			if defaultHTTP {
-				urlStr = "http://" + urlStr
-			} else {
-				urlStr = "https://" + urlStr
+	if !_emailRegex.MatchString(val) {
+		return "", ErrorEmailInvalid()
+	}
+
+	return val, nil
+}
+
+type DurationValidation struct {
+	GreaterThan          *time.Duration
+	GreaterThanOrEqualTo *time.Duration
+	LessThan             *time.Duration
+	LessThanOrEqualTo    *time.Duration
+	MultipleOf           *time.Duration
+}
+
+func DurationParser(v *DurationValidation) func(string) (interface{}, error) {
+	return func(str string) (interface{}, error) {
+		d, err := time.ParseDuration(str)
+		if err != nil {
+			return nil, err
+		}
+
+		if v == nil {
+			return d, nil
+		}
+
+		if v.GreaterThan != nil {
+			if d <= *v.GreaterThan {
+				return nil, ErrorMustBeGreaterThan(str, *v.GreaterThan)
 			}
 		}
 
-		if addPort {
-			if !portRe.MatchString(urlStr) {
-				if strings.HasPrefix(strings.ToLower(urlStr), "https") {
-					urlStr = urlStr + ":443"
-				} else {
-					urlStr = urlStr + ":80"
-				}
+		if v.GreaterThanOrEqualTo != nil {
+			if d < *v.GreaterThanOrEqualTo {
+				return nil, ErrorMustBeGreaterThanOrEqualTo(str, *v.GreaterThanOrEqualTo)
 			}
 		}
 
-		if _, err := urls.Parse(urlStr); err != nil {
-			return "", err
+		if v.LessThan != nil {
+			if d >= *v.LessThan {
+				return nil, ErrorMustBeLessThan(str, *v.LessThan)
+			}
 		}
 
-		return urlStr, nil
+		if v.LessThanOrEqualTo != nil {
+			if d > *v.LessThanOrEqualTo {
+				return nil, ErrorMustBeLessThanOrEqualTo(str, *v.LessThanOrEqualTo)
+			}
+		}
+
+		if v.MultipleOf != nil {
+			if d.Nanoseconds()%(*v.MultipleOf).Nanoseconds() != 0 {
+				return nil, ErrorIsNotMultiple(d, *v.MultipleOf)
+			}
+		}
+
+		return d, nil
 	}
+}
+
+func ValidateImageVersion(image, cortexVersion string) (string, error) {
+	if !strings.HasPrefix(image, "quay.io/cortexlabs/") && !strings.HasPrefix(image, "quay.io/cortexlabsdev/") && !strings.HasPrefix(image, "docker.io/cortexlabs/") && !strings.HasPrefix(image, "docker.io/cortexlabsdev/") && !strings.HasPrefix(image, "cortexlabs/") && !strings.HasPrefix(image, "cortexlabsdev/") {
+		return image, nil
+	}
+
+	tag := docker.ExtractImageTag(image)
+	// in docker, missing tag implies "latest"
+	if tag == "" {
+		tag = "latest"
+	}
+
+	if !strings.HasPrefix(tag, cortexVersion) {
+		return "", ErrorImageVersionMismatch(image, tag, cortexVersion)
+	}
+
+	return image, nil
 }

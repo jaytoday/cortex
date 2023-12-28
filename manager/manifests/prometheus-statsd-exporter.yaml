@@ -1,0 +1,111 @@
+# Copyright 2013 The Prometheus Authors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Modifications Copyright 2022 Cortex Labs, Inc.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-statsd-exporter-config
+  namespace: prometheus
+data:
+  statsd-mapping.yaml: |
+    defaults:
+      observer_type: histogram
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-statsd-exporter
+  namespace: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: prometheus-statsd-exporter
+  template:
+    metadata:
+      labels:
+        name: prometheus-statsd-exporter
+    spec:
+      containers:
+        - name: prometheus-statsd-exporter
+          image: $CORTEX_IMAGE_PROMETHEUS_STATSD_EXPORTER
+          imagePullPolicy: Always
+          args:
+            - --web.listen-address=:9102
+            - --web.telemetry-path=/metrics
+            - --statsd.listen-udp=:9125
+            - --statsd.listen-tcp=:9125
+            - --statsd.cache-size=1000
+            - --statsd.event-queue-size=10000
+            - --statsd.event-flush-threshold=1000
+            - --statsd.event-flush-interval=200ms
+            - --statsd.mapping-config=/etc/prometheus-statsd-exporter/statsd-mapping.yaml
+          ports:
+            - name: metrics
+              containerPort: 9102
+              protocol: TCP
+            - name: statsd-udp
+              containerPort: 9125
+              protocol: UDP
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            limits:
+              memory: 100Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+          volumeMounts:
+            - name: statsd-mapping-config
+              mountPath: /etc/prometheus-statsd-exporter
+      nodeSelector:
+        prometheus: "true"
+      tolerations:
+        - key: prometheus
+          operator: Exists
+          effect: NoSchedule
+      volumes:
+        - name: statsd-mapping-config
+          configMap:
+            name: prometheus-statsd-exporter-config
+            items:
+              - key: statsd-mapping.yaml
+                path: statsd-mapping.yaml
+      terminationGracePeriodSeconds: 60
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  namespace: prometheus
+  name: prometheus-statsd-exporter
+  labels:
+    cortex.dev/name: prometheus-statsd-exporter
+spec:
+  selector:
+    name: prometheus-statsd-exporter
+  ports:
+    - port: 9125
+      name: statsd-udp
+      protocol: UDP
+    - port: 9102
+      name: metrics
+      protocol: TCP

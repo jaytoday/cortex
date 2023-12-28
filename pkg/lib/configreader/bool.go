@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,26 +17,35 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
+	"strings"
 
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type BoolValidation struct {
-	Required bool
-	Default  bool
+	Required              bool
+	Default               bool
+	TreatNullAsFalse      bool // `<field>: ` and `<field>: null` will be read as `<field>: false`
+	CantBeSpecifiedErrStr *string
+	StrToBool             map[string]bool // lowercase
 }
 
 func Bool(inter interface{}, v *BoolValidation) (bool, error) {
 	if inter == nil {
-		return false, ErrorCannotBeNull()
+		if v.TreatNullAsFalse {
+			return ValidateBoolProvided(false, v)
+		}
+		return false, ErrorCannotBeNull(v.Required)
 	}
 	casted, castOk := inter.(bool)
 	if !castOk {
 		return false, ErrorInvalidPrimitiveType(inter, PrimTypeBool)
 	}
-	return ValidateBool(casted, v)
+	return ValidateBoolProvided(casted, v)
 }
 
 func BoolFromInterfaceMap(key string, iMap map[string]interface{}, v *BoolValidation) (bool, error) {
@@ -75,11 +84,25 @@ func BoolFromStr(valStr string, v *BoolValidation) (bool, error) {
 	if valStr == "" {
 		return ValidateBoolMissing(v)
 	}
+	if len(v.StrToBool) > 0 {
+		casted, ok := v.StrToBool[strings.ToLower(valStr)]
+
+		if !ok {
+			keys := make([]string, 0, len(v.StrToBool))
+			for key := range v.StrToBool {
+				keys = append(keys, key)
+			}
+
+			return false, ErrorInvalidStr(valStr, keys[0], keys[1:]...)
+		}
+		return ValidateBoolProvided(casted, v)
+	}
+
 	casted, castOk := s.ParseBool(valStr)
 	if !castOk {
 		return false, ErrorInvalidPrimitiveType(valStr, PrimTypeBool)
 	}
-	return ValidateBool(casted, v)
+	return ValidateBoolProvided(casted, v)
 }
 
 func BoolFromEnv(envVarName string, v *BoolValidation) (bool, error) {
@@ -99,15 +122,26 @@ func BoolFromEnv(envVarName string, v *BoolValidation) (bool, error) {
 }
 
 func BoolFromFile(filePath string, v *BoolValidation) (bool, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateBoolMissing(v)
 		if err != nil {
 			return false, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return false, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateBoolMissing(v)
+		if err != nil {
+			return false, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := BoolFromStr(valStr, v)
 	if err != nil {
 		return false, errors.Wrap(err, filePath)
@@ -123,9 +157,9 @@ func BoolFromEnvOrFile(envVarName string, filePath string, v *BoolValidation) (b
 	return BoolFromFile(filePath, v)
 }
 
-func BoolFromPrompt(promptOpts *PromptOptions, v *BoolValidation) (bool, error) {
-	promptOpts.defaultStr = s.Bool(v.Default)
-	valStr := prompt(promptOpts)
+func BoolFromPrompt(promptOpts *prompt.Options, v *BoolValidation) (bool, error) {
+	promptOpts.DefaultStr = s.Bool(v.Default)
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateBoolMissing(v)
 	}
@@ -136,10 +170,17 @@ func ValidateBoolMissing(v *BoolValidation) (bool, error) {
 	if v.Required {
 		return false, ErrorMustBeDefined()
 	}
-	return ValidateBool(v.Default, v)
+	return validateBool(v.Default, v)
 }
 
-func ValidateBool(val bool, v *BoolValidation) (bool, error) {
+func ValidateBoolProvided(val bool, v *BoolValidation) (bool, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return false, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+	return validateBool(val, v)
+}
+
+func validateBool(val bool, v *BoolValidation) (bool, error) {
 	return val, nil
 }
 
@@ -150,7 +191,7 @@ func ValidateBool(val bool, v *BoolValidation) (bool, error) {
 func MustBoolFromEnv(envVarName string, v *BoolValidation) bool {
 	val, err := BoolFromEnv(envVarName, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -158,7 +199,7 @@ func MustBoolFromEnv(envVarName string, v *BoolValidation) bool {
 func MustBoolFromFile(filePath string, v *BoolValidation) bool {
 	val, err := BoolFromFile(filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -166,7 +207,7 @@ func MustBoolFromFile(filePath string, v *BoolValidation) bool {
 func MustBoolFromEnvOrFile(envVarName string, filePath string, v *BoolValidation) bool {
 	val, err := BoolFromEnvOrFile(envVarName, filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
