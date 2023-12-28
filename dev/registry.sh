@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2019 Cortex Labs, Inc.
+# Copyright 2022 Cortex Labs, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,152 +14,223 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+CORTEX_VERSION=master
 
-set -euo pipefail
+set -eo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. >/dev/null && pwd)"
 
-source $ROOT/dev/config/build.sh
+source $ROOT/build/images.sh
 source $ROOT/dev/util.sh
 
-ecr_logged_in=false
+images_that_can_run_locally="operator manager"
 
-function ecr_login() {
-  if [ "$ecr_logged_in" = false ]; then
+if [ -f "$ROOT/dev/config/env.sh" ]; then
+  source $ROOT/dev/config/env.sh
+fi
+
+AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID:-}
+AWS_REGION=${AWS_REGION:-}
+
+skip_push="false"
+include_arm64_arch="false"
+positional_args=()
+while [[ $# -gt 0 ]]; do
+  key="$1"
+  case $key in
+    --skip-push)
+    skip_push="true"
+    shift
+    ;;
+    --include-arm64-arch)
+    include_arm64_arch="true"
+    shift
+    ;;
+    *)
+    positional_args+=("$1")
+    shift
+    ;;
+  esac
+done
+set -- "${positional_args[@]}"
+positional_args=()
+for i in "$@"; do
+  case $i in
+    *)
+    positional_args+=("$1")
+    shift
+    ;;
+  esac
+done
+set -- "${positional_args[@]}"
+for arg in "$@"; do
+  if [[ "$arg" == -* ]]; then
+    echo "unknown flag: $arg"
+    exit 1
+  fi
+done
+
+cmd=${1:-""}
+sub_cmd=${2:-""}
+
+registry_push_url=""
+if [ "$skip_push" != "true" ]; then
+  registry_push_url="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+fi
+
+is_registry_logged_in="false"
+
+function registry_login() {
+  if [ "$is_registry_logged_in" = "false" ]; then
     blue_echo "Logging in to ECR..."
-    ecr_login_command=$(aws ecr get-login --no-include-email --region $REGISTRY_REGION)
-    eval $ecr_login_command
-    ecr_logged_in=true
+    aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $registry_push_url
+    is_registry_logged_in="true"
     green_echo "Success\n"
   fi
 }
 
-function create_registry() {
-  aws ecr create-repository --repository-name=cortexlabs/manager --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/fluentd --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/istio-citadel --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/istio-pilot --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/istio-galley --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/istio-sidecar --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/istio-proxy --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/istio-proxy-init --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/istio-mixer --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/operator --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/spark --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/spark-operator --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/tf-serve --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/tf-train --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/tf-api --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/python-packager --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/tf-train-gpu --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/tf-serve-gpu --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/onnx-serve --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/onnx-serve-gpu --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/cluster-autoscaler --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/nvidia --region=$REGISTRY_REGION || true
-  aws ecr create-repository --repository-name=cortexlabs/metrics-server --region=$REGISTRY_REGION || true
+function create_ecr_repository() {
+  for image in "${all_images[@]}"; do
+    aws ecr create-repository --repository-name=cortexlabs/$image --region=$AWS_REGION || true
+  done
 }
 
 ### HELPERS ###
 
-function build() {
-  dir=$1
-  image=$2
-  tag=$3
-
-  blue_echo "Building $image:$tag..."
-  docker build $ROOT -f $dir/Dockerfile -t cortexlabs/$image:$tag -t $REGISTRY_URL/cortexlabs/$image:$tag
-  green_echo "Built $image:$tag\n"
-}
-
-function build_base() {
-  dir=$1
-  image=$2
-
-  blue_echo "Building $image..."
-  docker build $ROOT -f $dir/Dockerfile -t cortexlabs/$image:latest
-  green_echo "Built $image\n"
-}
-
-function cache_builder() {
-  dir=$1
-  image=$2
-
-  blue_echo "Building $image-builder..."
-  docker build $ROOT -f $dir/Dockerfile -t cortexlabs/$image-builder:latest --target builder
-  green_echo "Built $image-builder\n"
-}
-
-function push() {
-  ecr_login
-
-  image=$1
-  tag=$2
-
-  blue_echo "Pushing $image:$tag..."
-  docker push $REGISTRY_URL/cortexlabs/$image:$tag
-  green_echo "Pushed $image:$tag\n"
-}
-
 function build_and_push() {
-  dir=$1
-  image=$2
-  tag=$3
+  local image=$1
+  local include_arm64_arch=$2
+  local dir="${ROOT}/images/${image}"
 
-  build $dir $image $tag
-  push $image $tag
-}
+  set -euo pipefail
 
-function cleanup() {
-  docker container prune -f
-  docker image prune -f
-}
-
-cmd=${1:-""}
-env=${2:-""}
-
-if [ "$cmd" = "create" ]; then
-  create_registry
-
-elif [ "$cmd" = "update-manager-local" ]; then
-  build $ROOT/images/manager manager latest
-
-elif [ "$cmd" = "update" ]; then
-  if [ "$env" != "dev" ]; then
-    build_and_push $ROOT/images/manager manager latest
-
-    cache_builder $ROOT/images/spark-base spark-base
-    build_base $ROOT/images/spark-base spark-base
-    build_base $ROOT/images/tf-base tf-base
-    build_base $ROOT/images/tf-base-gpu tf-base-gpu
-
-    cache_builder $ROOT/images/operator operator
-    build_and_push $ROOT/images/operator operator latest
-
-    cache_builder $ROOT/images/spark-operator spark-operator
-    build_and_push $ROOT/images/spark-operator spark-operator latest
-    build_and_push $ROOT/images/spark spark latest
-    build_and_push $ROOT/images/tf-train tf-train latest
-    build_and_push $ROOT/images/tf-train-gpu tf-train-gpu latest
-    build_and_push $ROOT/images/fluentd fluentd latest
-    build_and_push $ROOT/images/tf-serve tf-serve latest
-    build_and_push $ROOT/images/tf-serve-gpu tf-serve-gpu latest
-    build_and_push $ROOT/images/onnx-serve-gpu onnx-serve-gpu latest
-    build_and_push $ROOT/images/python-packager python-packager latest
-    build_and_push $ROOT/images/cluster-autoscaler cluster-autoscaler latest
-    build_and_push $ROOT/images/nvidia nvidia latest
-    build_and_push $ROOT/images/metrics-server metrics-server latest
-    build_and_push $ROOT/images/istio-citadel istio-citadel latest
-    build_and_push $ROOT/images/istio-pilot istio-pilot latest
-    build_and_push $ROOT/images/istio-galley istio-galley latest
-    build_and_push $ROOT/images/istio-sidecar istio-sidecar latest
-    build_and_push $ROOT/images/istio-proxy istio-proxy latest
-    build_and_push $ROOT/images/istio-proxy-init istio-proxy-init latest
-    build_and_push $ROOT/images/istio-mixer istio-mixer latest
+  if [[ ! " ${multi_arch_images[*]} " =~ " $image " ]]; then
+    include_arm64_arch="false"
   fi
 
-  build_and_push $ROOT/images/tf-api tf-api latest
-  build_and_push $ROOT/images/onnx-serve onnx-serve latest
+  if [ ! -n "$AWS_ACCOUNT_ID" ] || [ ! -n "$AWS_REGION" ]; then
+    echo "AWS_ACCOUNT_ID or AWS_REGION env vars not found"
+    exit 1
+  fi
 
-  cleanup
+  tag=$CORTEX_VERSION
+
+  push_or_not_flag=""
+  running_operation="Building"
+  finished_operation="Built"
+  if [ "$skip_push" = "false" ]; then
+    push_or_not_flag="--push"
+    running_operation+=" and pushing"
+    finished_operation+=" and pushed"
+    registry_login
+  fi
+
+  if [ "$include_arm64_arch" = "true" ]; then
+    blue_echo "$running_operation $image:$tag (amd64 and arm64)..."
+  else
+    blue_echo "$running_operation $image:$tag (amd64)..."
+  fi
+
+  platforms="linux/amd64"
+  if [ "$include_arm64_arch" = "true" ]; then
+    platforms+=",linux/arm64"
+  fi
+
+  docker buildx build $ROOT -f $dir/Dockerfile -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/cortexlabs/$image:$tag --platform $platforms $push_or_not_flag
+
+  if [ "$include_arm64_arch" = "true" ]; then
+    green_echo "$finished_operation $image:$tag (amd64 and arm64)"
+  else
+    green_echo "$finished_operation $image:$tag (amd64)"
+  fi
+
+  if [[ " ${images_that_can_run_locally[*]} " =~ " $image " ]] && [[ "$include_arm64_arch" == "false" ]]; then
+    blue_echo "Exporting $image:$tag to local docker..."
+    docker buildx build $ROOT -f $dir/Dockerfile -t cortexlabs/$image:$tag -t $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/cortexlabs/$image:$tag --platform $platforms --load
+    green_echo "Exported $image:$tag to local docker"
+  fi
+}
+
+function cleanup_local() {
+  echo "cleaning local repositories..."
+  docker container prune -f
+  docker image prune -f
+  docker buildx prune -f
+}
+
+function cleanup_ecr() {
+  echo "cleaning ECR repositories..."
+  repos=$(aws ecr describe-repositories --output text | awk '{print $6}' | grep -P "\S")
+  echo "$repos" |
+  while IFS= read -r repo; do
+    imageIDs=$(aws ecr list-images --repository-name "$repo" --filter tagStatus=UNTAGGED --query "imageIds[*]" --output text)
+    echo "$imageIDs" |
+    while IFS= read -r imageId; do
+      if [ ! -z "$imageId" ]; then
+        echo "Removing from ECR: $repo/$imageId"
+        aws ecr batch-delete-image --repository-name "$repo" --image-ids imageDigest="$imageId" >/dev/null;
+      fi
+    done
+  done
+}
+
+function delete_ecr() {
+  echo "deleting ECR repositories..."
+  repos=$(aws ecr describe-repositories --output text | awk '{print $6}' | grep -P "\S")
+  echo "$repos" |
+  while IFS= read -r repo; do
+    imageIDs=$(aws ecr delete-repository --force --repository-name "$repo")
+    echo "deleted: $repo"
+  done
+}
+
+function validate_env() {
+  if [ "$skip_push" != "true" ]; then
+    if [ -z ${AWS_REGION} ] || [ -z ${AWS_ACCOUNT_ID} ]; then
+      echo "error: environment variables AWS_REGION and AWS_ACCOUNT_ID should be exported in dev/config/env.sh"
+      exit 1
+    fi
+  fi
+}
+
+# validate environment is correctly set on env.sh
+validate_env
+
+# usage: registry.sh clean
+if [ "$cmd" = "clean" ]; then
+  delete_ecr
+  create_ecr_repository
+
+# usage: registry.sh create
+elif [ "$cmd" = "create" ]; then
+  create_ecr_repository
+
+# usage: registry.sh update-single IMAGE
+elif [ "$cmd" = "update-single" ]; then
+  image=$sub_cmd
+  build_and_push $image $include_arm64_arch
+
+# usage: registry.sh update all|dev|api
+elif [ "$cmd" = "update" ]; then
+  images_to_build=()
+
+  if [ "$sub_cmd" == "all" ]; then
+    images_to_build+=( "${non_dev_images[@]}" )
+  fi
+
+  if [[ "$sub_cmd" == "all" || "$sub_cmd" == "dev" ]]; then
+    images_to_build+=( "${dev_images[@]}" )
+  fi
+
+  for image in "${images_to_build[@]}"; do
+    build_and_push $image $include_arm64_arch
+  done
+
+# usage: registry.sh clean-cache
+elif [ "$cmd" = "clean-cache" ]; then
+  cleanup_local
+
+else
+  echo "unknown command: $cmd"
+  exit 1
 fi

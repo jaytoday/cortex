@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,35 +17,141 @@ limitations under the License.
 package aws
 
 import (
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sts"
+	"encoding/base64"
+	"encoding/xml"
+	"io/ioutil"
+	"net/http"
+	"net/url"
+	"strings"
 
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/request"
+	"github.com/aws/aws-sdk-go/private/protocol/query"
+	"github.com/aws/aws-sdk-go/private/protocol/xml/xmlutil"
+	"github.com/aws/aws-sdk-go/service/sts"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/hash"
+	libjson "github.com/cortexlabs/cortex/pkg/lib/json"
+	"github.com/cortexlabs/cortex/pkg/lib/pointer"
 )
 
-func (c *Client) AuthUser(accessKeyID string, secretAccessKey string) (bool, error) {
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(c.Region),
-		DisableSSL:  aws.Bool(false),
-		Credentials: credentials.NewStaticCredentials(accessKeyID, secretAccessKey, ""),
-	})
+// Returns account ID, whether the credentials were valid, any other error that occurred
+// Ignores cache, so will re-run on every call to this method
+func (c *Client) CheckCredentials() (string, string, error) {
+	response, err := c.STS().GetCallerIdentity(nil)
 	if err != nil {
-		return false, errors.WithStack(err)
+		return "", "", ErrorInvalidAWSCredentials(err)
 	}
-	userSTSClient := sts.New(sess)
 
-	response, err := userSTSClient.GetCallerIdentity(nil)
-	if awsErr, ok := err.(awserr.RequestFailure); ok {
-		if awsErr.StatusCode() == 403 {
-			return false, nil
+	c.accountID = response.Account
+	c.hashedAccountID = pointer.String(hash.String(*c.accountID))
+
+	return *c.accountID, *c.hashedAccountID, nil
+}
+
+// Only re-checks the credentials if they have never been checked (so will not catch e.g. credentials expiring or getting revoked)
+func (c *Client) GetCachedAccountID() (string, string, error) {
+	if c.accountID == nil || c.hashedAccountID == nil {
+		if _, _, err := c.CheckCredentials(); err != nil {
+			return "", "", err
 		}
 	}
+	return *c.accountID, *c.hashedAccountID, nil
+}
+
+type awsRequest struct {
+	Header        http.Header
+	URL           string
+	Method        string
+	Host          string
+	Body          string
+	ContentLength int64
+}
+
+func (c *Client) IdentityRequestAsHeader() (string, error) {
+	req, _ := c.STS().GetCallerIdentityRequest(nil)
+
+	err := req.Sign()
 	if err != nil {
-		return false, errors.WithStack(err)
+		return "", errors.WithStack(err)
 	}
 
-	return *response.Account == c.awsAccountID, nil
+	reqBody, err := ioutil.ReadAll(req.HTTPRequest.Body)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	signedRequestArtifacts := awsRequest{
+		Header:        req.HTTPRequest.Header,
+		URL:           req.HTTPRequest.URL.String(),
+		Method:        req.HTTPRequest.Method,
+		Host:          req.HTTPRequest.Host,
+		Body:          string(reqBody),
+		ContentLength: req.HTTPRequest.ContentLength,
+	}
+	jsonSignedRequestArtifacts, err := libjson.Marshal(signedRequestArtifacts)
+	if err != nil {
+		return "", err
+	}
+
+	return base64.RawURLEncoding.EncodeToString(jsonSignedRequestArtifacts), nil
+}
+
+// ExecuteIdentityRequestFromHeader executes identity request marshalled from header and returns account id if successful
+func ExecuteIdentityRequestFromHeader(indentityRequestheader string) (string, error) {
+	jsonObj, err := base64.RawURLEncoding.DecodeString(indentityRequestheader)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	signedRequestArtifacts := awsRequest{}
+	err = libjson.Unmarshal(jsonObj, &signedRequestArtifacts)
+	if err != nil {
+		return "", err
+	}
+
+	httpClient := http.Client{}
+
+	url, err := url.Parse(signedRequestArtifacts.URL)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	req := http.Request{
+		Header:        signedRequestArtifacts.Header,
+		Method:        signedRequestArtifacts.Method,
+		URL:           url,
+		Body:          ioutil.NopCloser(strings.NewReader(signedRequestArtifacts.Body)),
+		ContentLength: signedRequestArtifacts.ContentLength,
+		Host:          signedRequestArtifacts.Host,
+	}
+
+	resp, err := httpClient.Do(&req)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		awsReq := request.Request{HTTPResponse: resp}
+		query.UnmarshalError(&awsReq)
+		return "", errors.WithStack(awsReq.Error)
+	}
+
+	decoder := xml.NewDecoder(resp.Body)
+
+	result := sts.GetCallerIdentityOutput{}
+	err = xmlutil.UnmarshalXML(&result, decoder, "GetCallerIdentityResult")
+	if err != nil {
+		return "", awserr.NewRequestFailure(
+			awserr.New(request.ErrCodeSerialization, "failed decoding Query response", err),
+			resp.StatusCode,
+			resp.Header.Get("X-Amzn-Requestid"),
+		)
+	}
+	if result.Account == nil {
+		return "", errors.ErrorUnexpected("GetCallerIdentityResult xml parsing failed")
+	}
+
+	return *result.Account, nil
 }

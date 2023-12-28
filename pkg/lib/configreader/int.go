@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,34 +17,42 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
-
 	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	"github.com/cortexlabs/cortex/pkg/lib/slices"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type IntValidation struct {
-	Required             bool
-	Default              int
-	AllowedValues        []int
-	GreaterThan          *int
-	GreaterThanOrEqualTo *int
-	LessThan             *int
-	LessThanOrEqualTo    *int
-	Validator            func(int) (int, error)
+	Required              bool
+	Default               int
+	TreatNullAsZero       bool // `<field>: ` and `<field>: null` will be read as `<field>: 0`
+	AllowedValues         []int
+	HiddenAllowedValues   []int // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues      []int
+	CantBeSpecifiedErrStr *string
+	GreaterThan           *int
+	GreaterThanOrEqualTo  *int
+	LessThan              *int
+	LessThanOrEqualTo     *int
+	Validator             func(int) (int, error)
 }
 
 func Int(inter interface{}, v *IntValidation) (int, error) {
 	if inter == nil {
-		return 0, ErrorCannotBeNull()
+		if v.TreatNullAsZero {
+			return ValidateIntProvided(0, v)
+		}
+		return 0, ErrorCannotBeNull(v.Required)
 	}
 	casted, castOk := cast.InterfaceToInt(inter)
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(inter, PrimTypeInt)
 	}
-	return ValidateInt(casted, v)
+	return ValidateIntProvided(casted, v)
 }
 
 func IntFromInterfaceMap(key string, iMap map[string]interface{}, v *IntValidation) (int, error) {
@@ -87,7 +95,7 @@ func IntFromStr(valStr string, v *IntValidation) (int, error) {
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(valStr, PrimTypeInt)
 	}
-	return ValidateInt(casted, v)
+	return ValidateIntProvided(casted, v)
 }
 
 func IntFromEnv(envVarName string, v *IntValidation) (int, error) {
@@ -107,15 +115,26 @@ func IntFromEnv(envVarName string, v *IntValidation) (int, error) {
 }
 
 func IntFromFile(filePath string, v *IntValidation) (int, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateIntMissing(v)
 		if err != nil {
 			return 0, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return 0, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateIntMissing(v)
+		if err != nil {
+			return 0, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := IntFromStr(valStr, v)
 	if err != nil {
 		return 0, errors.Wrap(err, filePath)
@@ -131,9 +150,9 @@ func IntFromEnvOrFile(envVarName string, filePath string, v *IntValidation) (int
 	return IntFromFile(filePath, v)
 }
 
-func IntFromPrompt(promptOpts *PromptOptions, v *IntValidation) (int, error) {
-	promptOpts.defaultStr = s.Int(v.Default)
-	valStr := prompt(promptOpts)
+func IntFromPrompt(promptOpts *prompt.Options, v *IntValidation) (int, error) {
+	promptOpts.DefaultStr = s.Int(v.Default)
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateIntMissing(v)
 	}
@@ -142,12 +161,19 @@ func IntFromPrompt(promptOpts *PromptOptions, v *IntValidation) (int, error) {
 
 func ValidateIntMissing(v *IntValidation) (int, error) {
 	if v.Required {
-		return 0, ErrorMustBeDefined()
+		return 0, ErrorMustBeDefined(v.AllowedValues)
 	}
-	return ValidateInt(v.Default, v)
+	return validateInt(v.Default, v)
 }
 
-func ValidateInt(val int, v *IntValidation) (int, error) {
+func ValidateIntProvided(val int, v *IntValidation) (int, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return 0, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+	return validateInt(val, v)
+}
+
+func validateInt(val int, v *IntValidation) (int, error) {
 	err := ValidateIntVal(val, v)
 	if err != nil {
 		return 0, err
@@ -181,9 +207,15 @@ func ValidateIntVal(val int, v *IntValidation) error {
 		}
 	}
 
-	if v.AllowedValues != nil {
-		if !slices.HasInt(v.AllowedValues, val) {
-			return ErrorInvalidInt(val, v.AllowedValues...)
+	if len(v.AllowedValues) > 0 {
+		if !slices.HasInt(append(v.AllowedValues, v.HiddenAllowedValues...), val) {
+			return ErrorInvalidInt(val, v.AllowedValues[0], v.AllowedValues[1:]...)
+		}
+	}
+
+	if len(v.DisallowedValues) > 0 {
+		if slices.HasInt(v.DisallowedValues, val) {
+			return ErrorDisallowedValue(val)
 		}
 	}
 
@@ -197,7 +229,7 @@ func ValidateIntVal(val int, v *IntValidation) error {
 func MustIntFromEnv(envVarName string, v *IntValidation) int {
 	val, err := IntFromEnv(envVarName, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -205,7 +237,7 @@ func MustIntFromEnv(envVarName string, v *IntValidation) int {
 func MustIntFromFile(filePath string, v *IntValidation) int {
 	val, err := IntFromFile(filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -213,7 +245,7 @@ func MustIntFromFile(filePath string, v *IntValidation) int {
 func MustIntFromEnvOrFile(envVarName string, filePath string, v *IntValidation) int {
 	val, err := IntFromEnvOrFile(envVarName, filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }

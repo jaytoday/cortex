@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -27,8 +27,11 @@ type InterfaceMapValidation struct {
 	Default                map[string]interface{}
 	AllowExplicitNull      bool
 	AllowEmpty             bool
+	CantBeSpecifiedErrStr  *string
+	ConvertNullToEmpty     bool
 	ScalarsOnly            bool
 	StringLeavesOnly       bool
+	StringKeysOnly         bool // Useful for ensuring this field is JSON parsable; validates that all maps and nested maps only use string keys
 	AllowedLeafValues      []string
 	AllowCortexResources   bool
 	RequireCortexResources bool
@@ -67,8 +70,12 @@ func ValidateInterfaceMapMissing(v *InterfaceMapValidation) (map[string]interfac
 }
 
 func ValidateInterfaceMapProvided(val map[string]interface{}, v *InterfaceMapValidation) (map[string]interface{}, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return validateInterfaceMap(val, v)
 }
@@ -112,13 +119,43 @@ func validateInterfaceMap(val map[string]interface{}, v *InterfaceMapValidation)
 		}
 		for _, leafVal := range leafVals {
 			if !slices.HasString(v.AllowedLeafValues, leafVal) {
-				return nil, ErrorInvalidStr(leafVal, v.AllowedLeafValues...)
+				return nil, ErrorInvalidStr(leafVal, v.AllowedLeafValues[0], v.AllowedLeafValues[1:]...)
 			}
+		}
+	}
+
+	if v.StringKeysOnly {
+		for key, value := range val {
+			m, ok := cast.InterfaceToInterfaceInterfaceMap(value)
+			if !ok {
+				continue
+			}
+
+			stringToIntMap := map[string]interface{}{}
+			for kInterface, vInterface := range m {
+				kString, ok := kInterface.(string)
+				if !ok {
+					return nil, errors.Wrap(ErrorNonStringKeyFound(kInterface), key)
+				}
+				stringToIntMap[kString] = vInterface
+			}
+
+			_, err := validateInterfaceMap(stringToIntMap, v)
+			if err != nil {
+				return nil, errors.Wrap(err, key)
+			}
+
+			val[key] = stringToIntMap
 		}
 	}
 
 	if v.Validator != nil {
 		return v.Validator(val)
 	}
+
+	if val == nil && v.ConvertNullToEmpty {
+		val = make(map[string]interface{})
+	}
+
 	return val, nil
 }

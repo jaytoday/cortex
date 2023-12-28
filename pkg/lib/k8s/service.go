@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,47 +17,48 @@ limitations under the License.
 package k8s
 
 import (
+	"context"
+	"fmt"
+
+	"github.com/cortexlabs/cortex/pkg/lib/errors"
 	kcore "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	kmeta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	intstr "k8s.io/apimachinery/pkg/util/intstr"
-
-	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	klabels "k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-var serviceTypeMeta = kmeta.TypeMeta{
+var _serviceTypeMeta = kmeta.TypeMeta{
 	APIVersion: "v1",
 	Kind:       "Service",
 }
 
 type ServiceSpec struct {
 	Name        string
-	Namespace   string
+	PortName    string
 	Port        int32
 	TargetPort  int32
+	ServiceType kcore.ServiceType
 	Selector    map[string]string
 	Labels      map[string]string
 	Annotations map[string]string
 }
 
 func Service(spec *ServiceSpec) *kcore.Service {
-	if spec.Namespace == "" {
-		spec.Namespace = "default"
-	}
 	service := &kcore.Service{
-		TypeMeta: serviceTypeMeta,
+		TypeMeta: _serviceTypeMeta,
 		ObjectMeta: kmeta.ObjectMeta{
 			Name:        spec.Name,
-			Namespace:   spec.Namespace,
 			Labels:      spec.Labels,
 			Annotations: spec.Annotations,
 		},
 		Spec: kcore.ServiceSpec{
 			Selector: spec.Selector,
+			Type:     spec.ServiceType,
 			Ports: []kcore.ServicePort{
 				{
 					Protocol: kcore.ProtocolTCP,
-					Name:     "http",
+					Name:     spec.PortName,
 					Port:     spec.Port,
 					TargetPort: intstr.IntOrString{
 						IntVal: spec.TargetPort,
@@ -70,17 +71,20 @@ func Service(spec *ServiceSpec) *kcore.Service {
 }
 
 func (c *Client) CreateService(service *kcore.Service) (*kcore.Service, error) {
-	service.TypeMeta = serviceTypeMeta
-	service, err := c.serviceClient.Create(service)
+	service.TypeMeta = _serviceTypeMeta
+	service, err := c.serviceClient.Create(context.Background(), service, kmeta.CreateOptions{})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	return service, nil
 }
 
-func (c *Client) updateService(service *kcore.Service) (*kcore.Service, error) {
-	service.TypeMeta = serviceTypeMeta
-	service, err := c.serviceClient.Update(service)
+func (c *Client) UpdateService(existing, updated *kcore.Service) (*kcore.Service, error) {
+	updated.TypeMeta = _serviceTypeMeta
+	updated.Spec.ClusterIP = existing.Spec.ClusterIP
+	updated.ResourceVersion = existing.ResourceVersion
+
+	service, err := c.serviceClient.Update(context.Background(), updated, kmeta.UpdateOptions{})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -95,66 +99,66 @@ func (c *Client) ApplyService(service *kcore.Service) (*kcore.Service, error) {
 	if existing == nil {
 		return c.CreateService(service)
 	}
-
-	service.Spec.ClusterIP = existing.Spec.ClusterIP
-	service.ResourceVersion = existing.ResourceVersion
-	return c.updateService(service)
+	return c.UpdateService(existing, service)
 }
 
 func (c *Client) GetService(name string) (*kcore.Service, error) {
-	service, err := c.serviceClient.Get(name, kmeta.GetOptions{})
-	if kerrors.IsNotFound(err) {
-		return nil, nil
-	}
+	service, err := c.serviceClient.Get(context.Background(), name, kmeta.GetOptions{})
 	if err != nil {
+		if kerrors.IsNotFound(err) {
+			return nil, nil
+		}
 		return nil, errors.WithStack(err)
 	}
-	service.TypeMeta = serviceTypeMeta
+	service.TypeMeta = _serviceTypeMeta
 	return service, nil
 }
 
 func (c *Client) DeleteService(name string) (bool, error) {
-	err := c.serviceClient.Delete(name, deleteOpts)
-	if kerrors.IsNotFound(err) {
-		return false, nil
-	}
+	err := c.serviceClient.Delete(context.Background(), name, _deleteOpts)
 	if err != nil {
+		if kerrors.IsNotFound(err) {
+			return false, nil
+		}
 		return false, errors.WithStack(err)
 	}
 	return true, nil
-}
-
-func (c *Client) ServiceExists(name string) (bool, error) {
-	service, err := c.GetService(name)
-	if err != nil {
-		return false, err
-	}
-	return service != nil, nil
 }
 
 func (c *Client) ListServices(opts *kmeta.ListOptions) ([]kcore.Service, error) {
 	if opts == nil {
 		opts = &kmeta.ListOptions{}
 	}
-	serviceList, err := c.serviceClient.List(*opts)
+	serviceList, err := c.serviceClient.List(context.Background(), *opts)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	for i := range serviceList.Items {
-		serviceList.Items[i].TypeMeta = serviceTypeMeta
+		serviceList.Items[i].TypeMeta = _serviceTypeMeta
 	}
 	return serviceList.Items, nil
 }
 
 func (c *Client) ListServicesByLabels(labels map[string]string) ([]kcore.Service, error) {
 	opts := &kmeta.ListOptions{
-		LabelSelector: LabelSelector(labels),
+		LabelSelector: klabels.SelectorFromSet(labels).String(),
 	}
 	return c.ListServices(opts)
 }
 
 func (c *Client) ListServicesByLabel(labelKey string, labelValue string) ([]kcore.Service, error) {
 	return c.ListServicesByLabels(map[string]string{labelKey: labelValue})
+}
+
+func (c *Client) ListServicesWithLabelKeys(labelKeys ...string) ([]kcore.Service, error) {
+	opts := &kmeta.ListOptions{
+		LabelSelector: LabelExistsSelector(labelKeys...),
+	}
+	return c.ListServices(opts)
+}
+
+func (c *Client) InternalServiceEndpoint(serviceName string, portNumber int32) string {
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", serviceName, c.Namespace, portNumber)
 }
 
 func ServiceMap(services []kcore.Service) map[string]kcore.Service {

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,121 +17,233 @@ limitations under the License.
 package telemetry
 
 import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"net/http"
+	"os"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/cortexlabs/cortex/pkg/consts"
+	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/maps"
+	"github.com/cortexlabs/cortex/pkg/lib/parallel"
+	s "github.com/cortexlabs/cortex/pkg/lib/strings"
+	"github.com/getsentry/sentry-go"
+	"gopkg.in/segmentio/analytics-go.v3"
 )
+
+var _sentryDSN = "https://5cea3d2d67194d028f7191fcc6ebca14@sentry.io/1825326"
+var _segmentWriteKey = "BNhXifMk9EyhPICF2zAFpWYPCf4CRpV1"
+
+var _segment analytics.Client
+var _config *Config
+
+type Config struct {
+	Enabled     bool
+	UserID      string
+	Properties  map[string]string
+	Environment string
+	LogErrors   bool
+	BackoffMode BackoffMode
+}
+
+type BackoffMode int
 
 const (
-	eventPath = "/events"
-	errorPath = "/errors"
+	NoBackoff BackoffMode = iota
+	BackoffDuplicateMessages
+	BackoffAnyMessages
 )
 
-type Client struct {
-	url             string
-	http            http.Client
-	EnableTelemetry bool
-	OperatorID      string
+type silentSegmentLogger struct{}
+
+func (logger silentSegmentLogger) Logf(_ string, _ ...interface{}) {
+	return
 }
 
-func New(telemetryURL string, hashedAccountID string, enable bool) *Client {
-	timeout := time.Duration(10 * time.Second)
-	httpClient := http.Client{
-		Timeout: timeout,
-	}
-	telem := &Client{
-		url:             telemetryURL,
-		http:            httpClient,
-		EnableTelemetry: enable,
-		OperatorID:      hashedAccountID,
-	}
-
-	return telem
+func (logger silentSegmentLogger) Errorf(_ string, _ ...interface{}) {
+	return
 }
 
-type UsageEvent struct {
-	Timestamp  time.Time `json:"timestamp"`
-	Version    string    `json:"version"`
-	OperatorID string    `json:"operator_id"`
-	Event      string    `json:"event"`
+type silentSentryLogger struct{}
+
+func (logger silentSentryLogger) Write(p []byte) (n int, err error) {
+	return len(p), nil
 }
 
-func (c *Client) sendUsageEvent(name string) {
-	usageEvent := UsageEvent{
-		Timestamp:  time.Now(),
-		Version:    consts.CortexVersion,
-		OperatorID: c.OperatorID,
-		Event:      name,
+func getSentryDSN() string {
+	if envVar := os.Getenv("CORTEX_TELEMETRY_SENTRY_DSN"); envVar != "" {
+		return envVar
+	}
+	return _sentryDSN
+}
+
+func Init(telemetryConfig Config) error {
+	if !telemetryConfig.Enabled {
+		_config = nil
+		return nil
 	}
 
-	byteArray, _ := json.Marshal(usageEvent)
-	resp, err := c.http.Post(c.url+eventPath, "application/json", bytes.NewReader(byteArray))
+	if telemetryConfig.UserID == "" {
+		return ErrorUserIDNotSpecified()
+	}
+
+	err := sentry.Init(sentry.ClientOptions{
+		Dsn:         getSentryDSN(),
+		Release:     consts.CortexVersion,
+		Environment: telemetryConfig.Environment,
+	})
 	if err != nil {
-		errors.PrintError(err)
+		_config = nil
+		return err
+	}
+
+	var segmentLogger analytics.Logger
+	if !telemetryConfig.LogErrors {
+		sentry.Logger.SetOutput(silentSentryLogger{})
+		segmentLogger = silentSegmentLogger{}
+	}
+
+	writeKey := _segmentWriteKey
+	if envVar := os.Getenv("CORTEX_TELEMETRY_SEGMENT_WRITE_KEY"); envVar != "" {
+		writeKey = envVar
+	}
+
+	_segment, err = analytics.NewWithConfig(writeKey, analytics.Config{
+		BatchSize: 1,
+		Logger:    segmentLogger,
+		DefaultContext: &analytics.Context{
+			App: analytics.AppInfo{
+				Version: consts.CortexVersion,
+			},
+			Device: analytics.DeviceInfo{
+				Type: telemetryConfig.Environment,
+			},
+		},
+	})
+	if err != nil {
+		_config = nil
+		return err
+	}
+
+	_config = &telemetryConfig
+	return nil
+}
+
+func Event(name string, properties ...map[string]interface{}) {
+	integrations := map[string]interface{}{
+		"All":   true,
+		"Slack": false,
+	}
+
+	eventHelper(name, maps.MergeStrInterfaceMaps(properties...), integrations)
+}
+
+func EventNotify(name string, properties ...map[string]interface{}) {
+	integrations := map[string]interface{}{
+		"All": true,
+	}
+
+	eventHelper(name, maps.MergeStrInterfaceMaps(properties...), integrations)
+}
+
+func eventHelper(name string, properties map[string]interface{}, integrations map[string]interface{}) {
+	if _config == nil || !_config.Enabled || strings.ToLower(os.Getenv("CORTEX_TELEMETRY_DISABLE")) == "true" {
 		return
 	}
 
-	defer resp.Body.Close()
+	mergedProperties := maps.MergeStrInterfaceMaps(properties, cast.StrMapToStrInterfaceMap(_config.Properties))
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if byteArray, err := ioutil.ReadAll(resp.Body); err == nil {
-			fmt.Println(string(byteArray))
-		}
-	}
-}
-
-type ErrorEvent struct {
-	Timestamp  time.Time `json:"timestamp"`
-	Version    string    `json:"version"`
-	OperatorID string    `json:"operator_id"`
-	Title      string    `json:"title"`
-	Stacktrace string    `json:"stacktrace"`
-}
-
-func (c *Client) sendErrorEvent(err error) {
-	errorEvent := ErrorEvent{
-		Timestamp:  time.Now(),
-		Version:    consts.CortexVersion,
-		OperatorID: c.OperatorID,
-		Title:      err.Error(),
-		Stacktrace: fmt.Sprintf("%+v", err),
-	}
-	byteArray, _ := json.Marshal(errorEvent)
-	resp, err := c.http.Post(c.url+errorPath, "application/json", bytes.NewReader(byteArray))
+	err := _segment.Enqueue(analytics.Track{
+		Event:        name,
+		UserId:       _config.UserID,
+		Properties:   mergedProperties,
+		Integrations: integrations,
+	})
 	if err != nil {
-		errors.PrintError(err)
+		Error(err)
+	}
+}
+
+func Error(err error, tags ...map[string]string) {
+	if err == nil || _config == nil || errors.IsNoTelemetry(err) {
 		return
 	}
 
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if byteArray, err := ioutil.ReadAll(resp.Body); err == nil {
-			fmt.Println(string(byteArray))
-		}
+	if shouldBlock(err, _config.BackoffMode) {
+		return
 	}
+
+	mergedTags := maps.MergeStrMapsString(tags...)
+
+	sentry.WithScope(func(scope *sentry.Scope) {
+		e := EventFromException(err)
+		scope.SetUser(sentry.User{ID: _config.UserID})
+		scope.SetTags(maps.MergeStrMapsString(_config.Properties, mergedTags))
+		scope.SetTags(map[string]string{"error_type": e.Exception[0].Type})
+		sentry.CaptureEvent(e)
+
+		go sentry.Flush(10 * time.Second)
+	})
 }
 
-func (c *Client) ReportEvent(name string) {
-	if c.EnableTelemetry {
-		go c.sendUsageEvent(name)
+func EventFromException(exception error) *sentry.Event {
+	stacktrace := sentry.ExtractStacktrace(exception)
+
+	if stacktrace == nil {
+		stacktrace = sentry.NewStacktrace()
 	}
+
+	errTypeString := reflect.TypeOf(errors.CauseOrSelf(exception)).String()
+
+	errKind := errors.GetKind(exception)
+	if errKind != "" && errKind != errors.ErrNotCortexError {
+		errTypeString = errKind
+	}
+
+	event := sentry.NewEvent()
+	event.Level = sentry.LevelError
+
+	value := errors.Message(exception)
+	if metadata := errors.GetMetadata(exception); metadata != nil {
+		value = value + "\n\n########## metadata ##########\n" + s.ObjStripped(metadata)
+	}
+
+	event.Exception = []sentry.Exception{{
+		Value:      value,
+		Type:       errTypeString,
+		Stacktrace: stacktrace,
+	}}
+	return event
 }
 
-func (c *Client) ReportErrorBlocking(err error) {
-	if c.EnableTelemetry {
-		c.sendErrorEvent(err)
+func RecordOperatorID(clientID string, operatorID string) {
+	if _config == nil || !_config.Enabled || strings.ToLower(os.Getenv("CORTEX_TELEMETRY_DISABLE")) == "true" {
+		return
 	}
+
+	_ = _segment.Enqueue(analytics.Identify{
+		UserId: clientID,
+		Traits: analytics.NewTraits().
+			Set("operator_id", operatorID),
+	})
 }
 
-func (c *Client) ReportError(err error) {
-	if c.EnableTelemetry {
-		go c.sendErrorEvent(err)
+func closeSentry() error {
+	if !sentry.Flush(5 * time.Second) {
+		return ErrorSentryFlushTimeoutExceeded()
 	}
+	return nil
+}
+
+func closeSegment() error {
+	if _segment == nil {
+		return nil
+	}
+	return _segment.Close()
+}
+
+func Close() {
+	parallel.Run(closeSegment, closeSentry)
+	_config = nil
 }

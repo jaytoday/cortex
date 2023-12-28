@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,53 +18,83 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
+	"github.com/cortexlabs/cortex/cli/cluster"
+	"github.com/cortexlabs/cortex/cli/types/flags"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	libjson "github.com/cortexlabs/cortex/pkg/lib/json"
+	"github.com/cortexlabs/cortex/pkg/lib/print"
+	"github.com/cortexlabs/cortex/pkg/lib/telemetry"
+	"github.com/cortexlabs/cortex/pkg/operator/schema"
 	"github.com/spf13/cobra"
-
-	"github.com/cortexlabs/cortex/pkg/lib/errors"
-	"github.com/cortexlabs/cortex/pkg/lib/json"
-	s "github.com/cortexlabs/cortex/pkg/lib/strings"
-	"github.com/cortexlabs/cortex/pkg/operator/api/schema"
 )
 
-var flagKeepCache bool
+var (
+	_flagDeleteEnv       string
+	_flagDeleteKeepCache bool
+	_flagDeleteForce     bool
+)
 
-func init() {
-	deleteCmd.PersistentFlags().BoolVarP(&flagKeepCache, "keep-cache", "c", false, "keep cached data for the deployment")
-	addEnvFlag(deleteCmd)
+func deleteInit() {
+	_deleteCmd.Flags().SortFlags = false
+	_deleteCmd.Flags().StringVarP(&_flagDeleteEnv, "env", "e", "", "environment to use")
+
+	_deleteCmd.Flags().BoolVarP(&_flagDeleteForce, "force", "f", false, "delete the api without confirmation")
+	_deleteCmd.Flags().BoolVarP(&_flagDeleteKeepCache, "keep-cache", "c", false, "keep cached data for the api")
+	_deleteCmd.Flags().VarP(&_flagOutput, "output", "o", fmt.Sprintf("output format: one of %s", strings.Join(flags.OutputTypeStringsExcluding(flags.YAMLOutputType), "|")))
 }
 
-var deleteCmd = &cobra.Command{
-	Use:   "delete [DEPLOYMENT_NAME]",
-	Short: "delete a deployment",
-	Long:  "Delete a deployment.",
-	Args:  cobra.MaximumNArgs(1),
+var _deleteCmd = &cobra.Command{
+	Use:   "delete API_NAME [JOB_ID]",
+	Short: "delete an api or stop a job",
+	Args:  cobra.RangeArgs(1, 2),
 	Run: func(cmd *cobra.Command, args []string) {
-		var appName string
-		var err error
-		if len(args) == 1 {
-			appName = args[0]
-		} else {
-			appName, err = appNameFromConfig()
-			if err != nil {
-				errors.Exit(err)
-			}
+		envName, err := getEnvFromFlag(_flagDeleteEnv)
+		if err != nil {
+			telemetry.Event("cli.delete")
+			exit.Error(err)
 		}
 
-		params := map[string]string{
-			"appName":   appName,
-			"keepCache": s.Bool(flagKeepCache),
-		}
-		httpResponse, err := HTTPPostJSONData("/delete", nil, params)
+		env, err := ReadOrConfigureEnv(envName)
 		if err != nil {
-			errors.Exit(err)
+			telemetry.Event("cli.delete")
+			exit.Error(err)
+		}
+		telemetry.Event("cli.delete", map[string]interface{}{"env_name": env.Name})
+
+		err = printEnvIfNotSpecified(env.Name, cmd)
+		if err != nil {
+			exit.Error(err)
 		}
 
 		var deleteResponse schema.DeleteResponse
-		err = json.Unmarshal(httpResponse, &deleteResponse)
-		if err != nil {
-			errors.Exit(err, "/delete", "response", string(httpResponse))
+		if len(args) == 2 {
+			apisRes, err := cluster.GetAPI(MustGetOperatorConfig(env.Name), args[0])
+			if err != nil {
+				exit.Error(err)
+			}
+
+			deleteResponse, err = cluster.StopJob(MustGetOperatorConfig(env.Name), apisRes[0].Spec.Kind, args[0], args[1])
+			if err != nil {
+				exit.Error(err)
+			}
+		} else {
+			deleteResponse, err = cluster.Delete(MustGetOperatorConfig(env.Name), args[0], _flagDeleteKeepCache, _flagDeleteForce)
+			if err != nil {
+				exit.Error(err)
+			}
 		}
-		fmt.Println(deleteResponse.Message)
+
+		if _flagOutput == flags.JSONOutputType {
+			bytes, err := libjson.Marshal(deleteResponse)
+			if err != nil {
+				exit.Error(err)
+			}
+			fmt.Print(string(bytes))
+			return
+		}
+
+		print.BoldFirstLine(deleteResponse.Message)
 	},
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,179 +17,274 @@ limitations under the License.
 package k8s
 
 import (
-	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"context"
 
+	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/sets/strset"
+	"github.com/cortexlabs/cortex/pkg/lib/urls"
+	istionetworking "istio.io/api/networking/v1beta1"
+	istioclientnetworking "istio.io/client-go/pkg/apis/networking/v1beta1"
+	istionetworkingclient "istio.io/client-go/pkg/clientset/versioned/typed/networking/v1beta1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	kmeta "k8s.io/apimachinery/pkg/apis/meta/v1"
-	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	kschema "k8s.io/apimachinery/pkg/runtime/schema"
+	klabels "k8s.io/apimachinery/pkg/labels"
 )
 
-var (
-	virtualServiceTypeMeta = kmeta.TypeMeta{
-		APIVersion: "v1alpha3",
-		Kind:       "VirtualService",
-	}
-
-	virtualServiceGVR = kschema.GroupVersionResource{
-		Group:    "networking.istio.io",
-		Version:  "v1alpha3",
-		Resource: "virtualservices",
-	}
-
-	virtualServiceGVK = kschema.GroupVersionKind{
-		Group:   "networking.istio.io",
-		Version: "v1alpha3",
-		Kind:    "VirtualService",
-	}
-)
-
-type VirtualServiceSpec struct {
-	Name        string
-	Namespace   string
-	Gateways    []string
-	ServiceName string
-	ServicePort int32
-	Path        string
-	Labels      map[string]string
-	Annotations map[string]string
+var _virtualServiceTypeMeta = kmeta.TypeMeta{
+	APIVersion: "v1beta1",
+	Kind:       "VirtualService",
 }
 
-func VirtualService(spec *VirtualServiceSpec) *kunstructured.Unstructured {
-	virtualServceConfig := &kunstructured.Unstructured{}
-	virtualServceConfig.SetGroupVersionKind(virtualServiceGVK)
-	virtualServceConfig.SetName(spec.Name)
-	virtualServceConfig.SetNamespace(spec.Namespace)
-	virtualServceConfig.Object["metadata"] = map[string]interface{}{
-		"name":        spec.Name,
-		"namespace":   spec.Namespace,
-		"labels":      spec.Labels,
-		"annotations": spec.Annotations,
-	}
-	virtualServceConfig.Object["spec"] = map[string]interface{}{
-		"hosts":    []string{"*"},
-		"gateways": spec.Gateways,
-		"http": []map[string]interface{}{
-			{
-				"match": []map[string]interface{}{
-					{
-						"uri": map[string]interface{}{
-							"prefix": spec.Path,
-						},
+type VirtualServiceSpec struct {
+	Name         string
+	Gateways     []string
+	ExactPath    *string // either this or PrefixPath
+	PrefixPath   *string // either this or ExactPath
+	Destinations []Destination
+	Rewrite      *string
+	Labels       map[string]string
+	Annotations  map[string]string
+	Headers      *istionetworking.Headers
+	Retries      *int32
+}
+
+type Destination struct {
+	ServiceName string
+	Weight      int32
+	Port        uint32
+	Shadow      bool
+	Headers     *istionetworking.Headers
+}
+
+func VirtualService(spec *VirtualServiceSpec) *istioclientnetworking.VirtualService {
+	destinations := []*istionetworking.HTTPRouteDestination{}
+	var mirror *istionetworking.Destination
+	var mirrorWeight *istionetworking.Percent
+
+	for _, destination := range spec.Destinations {
+		if destination.Shadow {
+			mirror = &istionetworking.Destination{
+				Host: destination.ServiceName,
+				Port: &istionetworking.PortSelector{
+					Number: destination.Port,
+				},
+			}
+			mirrorWeight = &istionetworking.Percent{Value: float64(destination.Weight)}
+		} else {
+			destinations = append(destinations, &istionetworking.HTTPRouteDestination{
+				Destination: &istionetworking.Destination{
+					Host: destination.ServiceName,
+					Port: &istionetworking.PortSelector{
+						Number: destination.Port,
 					},
 				},
-				"route": []map[string]interface{}{
-					{
-						"destination": map[string]interface{}{
-							"host": spec.ServiceName,
-							"port": map[string]interface{}{
-								"number": spec.ServicePort,
-							},
+				Weight:  destination.Weight,
+				Headers: destination.Headers,
+			})
+		}
+	}
+
+	var httpRoutes []*istionetworking.HTTPRoute
+
+	if spec.ExactPath != nil {
+		httpRoutes = append(httpRoutes, &istionetworking.HTTPRoute{
+			Match: []*istionetworking.HTTPMatchRequest{
+				{
+					Uri: &istionetworking.StringMatch{
+						MatchType: &istionetworking.StringMatch_Exact{
+							Exact: urls.CanonicalizeEndpoint(*spec.ExactPath),
 						},
 					},
 				},
 			},
+			Route:            destinations,
+			Mirror:           mirror,
+			MirrorPercentage: mirrorWeight,
+			Headers:          spec.Headers,
+		})
+
+		if spec.Rewrite != nil {
+			httpRoutes[0].Rewrite = &istionetworking.HTTPRewrite{
+				Uri: urls.CanonicalizeEndpoint(*spec.Rewrite),
+			}
+		}
+	} else {
+		exactMatch := &istionetworking.HTTPRoute{
+			Match: []*istionetworking.HTTPMatchRequest{
+				{
+					Uri: &istionetworking.StringMatch{
+						MatchType: &istionetworking.StringMatch_Exact{
+							Exact: urls.CanonicalizeEndpoint(*spec.PrefixPath),
+						},
+					},
+				},
+			},
+			Route:            destinations,
+			Mirror:           mirror,
+			MirrorPercentage: mirrorWeight,
+			Headers:          spec.Headers,
+		}
+
+		prefixMatch := &istionetworking.HTTPRoute{
+			Match: []*istionetworking.HTTPMatchRequest{
+				{
+					Uri: &istionetworking.StringMatch{
+						MatchType: &istionetworking.StringMatch_Prefix{
+							Prefix: urls.CanonicalizeEndpointWithTrailingSlash(*spec.PrefixPath),
+						},
+					},
+				},
+			},
+			Route:            destinations,
+			Mirror:           mirror,
+			MirrorPercentage: mirrorWeight,
+			Headers:          spec.Headers,
+		}
+
+		if spec.Rewrite != nil {
+			exactMatch.Rewrite = &istionetworking.HTTPRewrite{
+				Uri: urls.CanonicalizeEndpoint(*spec.Rewrite),
+			}
+
+			prefixMatch.Rewrite = &istionetworking.HTTPRewrite{
+				Uri: urls.CanonicalizeEndpointWithTrailingSlash(*spec.Rewrite),
+			}
+		}
+
+		httpRoutes = append(httpRoutes, exactMatch, prefixMatch)
+	}
+
+	if spec.Retries != nil {
+		for i := range httpRoutes {
+			httpRoutes[i].Retries = &istionetworking.HTTPRetry{
+				Attempts: *spec.Retries,
+			}
+		}
+	}
+
+	virtualService := &istioclientnetworking.VirtualService{
+		TypeMeta: _virtualServiceTypeMeta,
+		ObjectMeta: kmeta.ObjectMeta{
+			Name:        spec.Name,
+			Labels:      spec.Labels,
+			Annotations: spec.Annotations,
+		},
+		Spec: istionetworking.VirtualService{
+			Hosts:    []string{"*"},
+			Gateways: spec.Gateways,
+			Http:     httpRoutes,
 		},
 	}
 
-	return virtualServceConfig
+	return virtualService
 }
 
-func (c *Client) CreateVirtualService(spec *kunstructured.Unstructured) (*kunstructured.Unstructured, error) {
-	virtualService, err := c.dynamicClient.
-		Resource(virtualServiceGVR).
-		Namespace(spec.GetNamespace()).
-		Create(spec, kmeta.CreateOptions{
-			TypeMeta: virtualServiceTypeMeta,
-		})
+func (c *Client) VirtualServiceClient() istionetworkingclient.VirtualServiceInterface {
+	return c.virtualServiceClient
+}
+
+func (c *Client) CreateVirtualService(virtualService *istioclientnetworking.VirtualService) (*istioclientnetworking.VirtualService, error) {
+	virtualService.TypeMeta = _virtualServiceTypeMeta
+	virtualService, err := c.virtualServiceClient.Create(context.Background(), virtualService, kmeta.CreateOptions{})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	return virtualService, nil
 }
 
-func (c *Client) updateVirtualService(spec *kunstructured.Unstructured) (*kunstructured.Unstructured, error) {
-	virtualService, err := c.dynamicClient.
-		Resource(virtualServiceGVR).
-		Namespace(spec.GetNamespace()).
-		Update(spec, kmeta.UpdateOptions{
-			TypeMeta: virtualServiceTypeMeta,
-		})
+func (c *Client) UpdateVirtualService(existing, updated *istioclientnetworking.VirtualService) (*istioclientnetworking.VirtualService, error) {
+	updated.TypeMeta = _virtualServiceTypeMeta
+	updated.ResourceVersion = existing.ResourceVersion
+
+	virtualService, err := c.virtualServiceClient.Update(context.Background(), updated, kmeta.UpdateOptions{})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	return virtualService, nil
 }
 
-func (c *Client) ApplyVirtualService(spec *kunstructured.Unstructured) (*kunstructured.Unstructured, error) {
-	existing, err := c.GetVirtualService(spec.GetName(), spec.GetNamespace())
+func (c *Client) ApplyVirtualService(virtualService *istioclientnetworking.VirtualService) (*istioclientnetworking.VirtualService, error) {
+	existing, err := c.GetVirtualService(virtualService.Name)
 	if err != nil {
 		return nil, err
 	}
 	if existing == nil {
-		return c.CreateVirtualService(spec)
+		return c.CreateVirtualService(virtualService)
 	}
-	spec.SetResourceVersion(existing.GetResourceVersion())
-	return c.updateVirtualService(spec)
+	return c.UpdateVirtualService(existing, virtualService)
 }
 
-func (c *Client) GetVirtualService(name, namespace string) (*kunstructured.Unstructured, error) {
-	virtualService, err := c.dynamicClient.Resource(virtualServiceGVR).Namespace(namespace).Get(name, kmeta.GetOptions{
-		TypeMeta: virtualServiceTypeMeta,
-	})
-
-	if kerrors.IsNotFound(err) {
-		return nil, nil
-	}
+func (c *Client) GetVirtualService(name string) (*istioclientnetworking.VirtualService, error) {
+	virtualService, err := c.virtualServiceClient.Get(context.Background(), name, kmeta.GetOptions{})
 	if err != nil {
+		if kerrors.IsNotFound(err) {
+			return nil, nil
+		}
 		return nil, errors.WithStack(err)
 	}
+	virtualService.TypeMeta = _virtualServiceTypeMeta
 	return virtualService, nil
 }
 
-func (c *Client) VirtualServiceExists(name, namespace string) (bool, error) {
-	service, err := c.GetVirtualService(name, namespace)
+func (c *Client) DeleteVirtualService(name string) (bool, error) {
+	err := c.virtualServiceClient.Delete(context.Background(), name, _deleteOpts)
 	if err != nil {
-		return false, err
-	}
-	return service != nil, nil
-}
-
-func (c *Client) DeleteVirtualService(name, namespace string) (bool, error) {
-	err := c.dynamicClient.Resource(virtualServiceGVR).Namespace(namespace).Delete(name, &kmeta.DeleteOptions{
-		TypeMeta: virtualServiceTypeMeta,
-	})
-	if kerrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
+		if kerrors.IsNotFound(err) {
+			return false, nil
+		}
 		return false, errors.WithStack(err)
 	}
 	return true, nil
 }
 
-func (c *Client) ListVirtualServices(namespace string, opts *kmeta.ListOptions) ([]kunstructured.Unstructured, error) {
+func (c *Client) ListVirtualServices(opts *kmeta.ListOptions) ([]istioclientnetworking.VirtualService, error) {
 	if opts == nil {
 		opts = &kmeta.ListOptions{}
 	}
-
-	vsList, err := c.dynamicClient.Resource(virtualServiceGVR).Namespace(namespace).List(*opts)
+	vsList, err := c.virtualServiceClient.List(context.Background(), *opts)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	for i := range vsList.Items {
-		vsList.Items[i].SetGroupVersionKind(virtualServiceGVK)
+		vsList.Items[i].TypeMeta = _virtualServiceTypeMeta
 	}
 	return vsList.Items, nil
 }
 
-func (c *Client) ListVirtualServicesByLabels(namespace string, labels map[string]string) ([]kunstructured.Unstructured, error) {
+func (c *Client) ListVirtualServicesByLabels(labels map[string]string) ([]istioclientnetworking.VirtualService, error) {
 	opts := &kmeta.ListOptions{
-		LabelSelector: LabelSelector(labels),
+		LabelSelector: klabels.SelectorFromSet(labels).String(),
 	}
-	return c.ListVirtualServices(namespace, opts)
+	return c.ListVirtualServices(opts)
 }
 
-func (c *Client) ListVirtualServicesByLabel(namespace string, labelKey string, labelValue string) ([]kunstructured.Unstructured, error) {
-	return c.ListVirtualServicesByLabels(namespace, map[string]string{labelKey: labelValue})
+func (c *Client) ListVirtualServicesByLabel(labelKey string, labelValue string) ([]istioclientnetworking.VirtualService, error) {
+	return c.ListVirtualServicesByLabels(map[string]string{labelKey: labelValue})
+}
+
+func (c *Client) ListVirtualServicesWithLabelKeys(labelKeys ...string) ([]istioclientnetworking.VirtualService, error) {
+	opts := &kmeta.ListOptions{
+		LabelSelector: LabelExistsSelector(labelKeys...),
+	}
+	return c.ListVirtualServices(opts)
+}
+
+func ExtractVirtualServiceGateways(virtualService *istioclientnetworking.VirtualService) strset.Set {
+	return strset.FromSlice(virtualService.Spec.Gateways)
+}
+
+func ExtractVirtualServiceEndpoints(virtualService *istioclientnetworking.VirtualService) strset.Set {
+	endpoints := strset.New()
+	for _, http := range virtualService.Spec.Http {
+		for _, match := range http.Match {
+			if match.Uri.GetExact() != "" {
+				endpoints.Add(urls.CanonicalizeEndpoint(match.Uri.GetExact()))
+			}
+
+			if match.Uri.GetPrefix() != "" {
+				endpoints.Add(urls.CanonicalizeEndpoint(match.Uri.GetPrefix()))
+			}
+		}
+	}
+	return endpoints
 }

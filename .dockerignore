@@ -1,8 +1,9 @@
 /vendor/
 /bin/
+/testbin/
 /dev/
 /docs/
-/examples/
+/test/
 
 **/.*
 **/*.md
@@ -12,3 +13,7 @@
 **/*.pyo
 **/*.pyd
 **/__pycache__/
+
+**/hack/
+**/PROJECT
+**/Makefile

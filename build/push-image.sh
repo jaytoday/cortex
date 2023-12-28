@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2019 Cortex Labs, Inc.
+# Copyright 2022 Cortex Labs, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,10 +17,22 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. >/dev/null && pwd)"
+
 CORTEX_VERSION=master
 
-image=$1
+host_primary=$1
+host_backup=$2
+image=$3
+is_multi_arch=$4
+arch=$5
 
 echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+if [ "$is_multi_arch" = "true" ]; then
+  tag="manifest-${CORTEX_VERSION}-$arch"
+else
+  tag="${CORTEX_VERSION}"
+fi
 
-docker push cortexlabs/$image:$CORTEX_VERSION
+docker push $host_primary/cortexlabs/${image}:${tag}
+docker push $host_backup/cortexlabs/${image}:${tag}

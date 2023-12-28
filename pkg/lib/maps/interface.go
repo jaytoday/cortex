@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -56,4 +56,14 @@ func InterfaceMapsKeysMatch(map1 map[string]interface{}, map2 map[string]interfa
 		}
 	}
 	return true
+}
+
+func MergeStrInterfaceMaps(maps ...map[string]interface{}) map[string]interface{} {
+	merged := map[string]interface{}{}
+	for _, m := range maps {
+		for k, v := range m {
+			merged[k] = v
+		}
+	}
+	return merged
 }

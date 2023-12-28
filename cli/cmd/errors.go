@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,111 +18,275 @@ package cmd
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 
+	"github.com/cortexlabs/cortex/pkg/consts"
+	"github.com/cortexlabs/cortex/pkg/lib/errors"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
+	"github.com/cortexlabs/cortex/pkg/lib/urls"
+	"github.com/cortexlabs/cortex/pkg/types/clusterconfig"
 )
 
 const (
-	errStrCantMakeRequest = "unable to make request"
-	errStrRead            = "unable to read"
+	_errStrCantMakeRequest = "unable to make request"
+	_errStrRead            = "unable to read"
 )
 
-type ErrorKind int
+func errStrFailedToConnect(u url.URL) string {
+	return "failed to connect to " + urls.TrimQueryParamsURL(u)
+}
 
 const (
-	ErrUnknown ErrorKind = iota
-	ErrCliAlreadyInAppDir
-	ErrAPINotReady
-	ErrAPINotFound
-	ErrFailedToConnect
-	ErrCliNotInAppDir
+	ErrInvalidProvider                     = "cli.invalid_provider"
+	ErrInvalidLegacyProvider               = "cli.invalid_legacy_provider"
+	ErrNoAvailableEnvironment              = "cli.no_available_environment"
+	ErrEnvironmentNotSet                   = "cli.environment_not_set"
+	ErrEnvironmentNotFound                 = "cli.environment_not_found"
+	ErrFieldNotFoundInEnvironment          = "cli.field_not_found_in_environment"
+	ErrInvalidOperatorEndpoint             = "cli.invalid_operator_endpoint"
+	ErrNoOperatorLoadBalancer              = "cli.no_operator_load_balancer"
+	ErrCortexYAMLNotFound                  = "cli.cortex_yaml_not_found"
+	ErrDockerCtrlC                         = "cli.docker_ctrl_c"
+	ErrResponseUnknown                     = "cli.response_unknown"
+	ErrMissingAWSCredentials               = "cli.missing_aws_credentials"
+	ErrCredentialsInClusterConfig          = "cli.credentials_in_cluster_config"
+	ErrClusterUp                           = "cli.cluster_up"
+	ErrClusterConfigure                    = "cli.cluster_configure"
+	ErrClusterDebug                        = "cli.cluster_debug"
+	ErrClusterRefresh                      = "cli.cluster_refresh"
+	ErrClusterDown                         = "cli.cluster_down"
+	ErrSpecifyAtLeastOneFlag               = "cli.specify_at_least_one_flag"
+	ErrMinInstancesLowerThan               = "cli.min_instances_lower_than"
+	ErrMaxInstancesLowerThan               = "cli.max_instances_lower_than"
+	ErrMinInstancesGreaterThanMaxInstances = "cli.min_instances_greater_than_max_instances"
+	ErrNodeGroupNotFound                   = "cli.nodegroup_not_found"
+	ErrMutuallyExclusiveFlags              = "cli.mutually_exclusive_flags"
+	ErrClusterAccessConfigRequired         = "cli.cluster_access_config_or_prompts_required"
+	ErrShellCompletionNotSupported         = "cli.shell_completion_not_supported"
+	ErrNoTerminalWidth                     = "cli.no_terminal_width"
+	ErrDeployFromTopLevelDir               = "cli.deploy_from_top_level_dir"
+	ErrAPINameMustBeProvided               = "cli.api_name_must_be_provided"
+	ErrAPINotFoundInConfig                 = "cli.api_not_found_in_config"
+	ErrClusterUIDsLimitInBucket            = "cli.cluster_uids_limit_in_bucket"
 )
 
-var errorKinds = []string{
-	"err_unknown",
-	"err_cli_already_in_app_dir",
-	"err_api_not_ready",
-	"err_api_not_found",
-	"err_failed_to_connect",
-	"err_cli_not_in_app_dir",
+func ErrorInvalidProvider(providerStr, cliConfigPath string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrInvalidProvider,
+		Message: fmt.Sprintf("\"%s\" is not a supported provider (only aws is supported); remove the environment(s) which use the %s provider from %s, or delete %s (it will be recreated on subsequent CLI commands)", providerStr, providerStr, cliConfigPath, cliConfigPath),
+	})
 }
 
-var _ = [1]int{}[int(ErrCliNotInAppDir)-(len(errorKinds)-1)] // Ensure list length matches
-
-func (t ErrorKind) String() string {
-	return errorKinds[t]
+func ErrorInvalidLegacyProvider(providerStr, cliConfigPath string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrInvalidLegacyProvider,
+		Message: fmt.Sprintf("the %s provider is no longer supported on cortex v%s; remove the environment(s) which use the %s provider from %s, or delete %s (it will be recreated on subsequent CLI commands)", providerStr, consts.CortexVersionMinor, providerStr, cliConfigPath, cliConfigPath),
+	})
 }
 
-// MarshalText satisfies TextMarshaler
-func (t ErrorKind) MarshalText() ([]byte, error) {
-	return []byte(t.String()), nil
+func ErrorNoAvailableEnvironment() error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrNoAvailableEnvironment,
+		Message: "no environments are configured; run `cortex cluster up` to create a cluster, or run `cortex env configure` to connect to an existing cluster",
+	})
 }
 
-// UnmarshalText satisfies TextUnmarshaler
-func (t *ErrorKind) UnmarshalText(text []byte) error {
-	enum := string(text)
-	for i := 0; i < len(errorKinds); i++ {
-		if enum == errorKinds[i] {
-			*t = ErrorKind(i)
-			return nil
-		}
+func ErrorEnvironmentNotSet() error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrEnvironmentNotSet,
+		Message: "no environment was provided and the default environment is not set; specify the environment to use via the `-e/--env` flag, or run `cortex env default` to set the default environment",
+	})
+}
+
+func ErrorEnvironmentNotFound(envName string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrEnvironmentNotFound,
+		Message: fmt.Sprintf("unable to find environment named \"%s\"", envName),
+	})
+}
+
+func ErrorFieldNotFoundInEnvironment(fieldName string, envName string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrFieldNotFoundInEnvironment,
+		Message: fmt.Sprintf("%s was not found in %s environment", fieldName, envName),
+	})
+}
+
+func ErrorInvalidOperatorEndpoint(endpoint string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrInvalidOperatorEndpoint,
+		Message: fmt.Sprintf("%s is not a cortex operator endpoint; run `cortex cluster info` to show your operator endpoint or run `cortex cluster up` to spin up a new cluster", endpoint),
+	})
+}
+
+func ErrorNoOperatorLoadBalancer(whichLB string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrNoOperatorLoadBalancer,
+		Message: fmt.Sprintf("unable to locate %s load balancer", whichLB),
+	})
+}
+
+func ErrorCortexYAMLNotFound() error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrCortexYAMLNotFound,
+		Message: "no api config file was specified, and ./cortex.yaml does not exist; create cortex.yaml, or reference an existing config file by running `cortex deploy <config_file_path>`",
+	})
+}
+
+func ErrorDockerCtrlC() error {
+	return errors.WithStack(&errors.Error{
+		Kind:        ErrDockerCtrlC,
+		NoPrint:     true,
+		NoTelemetry: true,
+	})
+}
+
+func ErrorResponseUnknown(body string, statusCode int) error {
+	msg := body
+	if strings.TrimSpace(body) == "" {
+		msg = fmt.Sprintf("empty response (status code %d)", statusCode)
 	}
 
-	*t = ErrUnknown
-	return nil
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrResponseUnknown,
+		Message: msg,
+	})
 }
 
-// UnmarshalBinary satisfies BinaryUnmarshaler
-// Needed for msgpack
-func (t *ErrorKind) UnmarshalBinary(data []byte) error {
-	return t.UnmarshalText(data)
+func ErrorClusterUp(out string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrClusterUp,
+		Message: out,
+		NoPrint: true,
+	})
 }
 
-// MarshalBinary satisfies BinaryMarshaler
-func (t ErrorKind) MarshalBinary() ([]byte, error) {
-	return []byte(t.String()), nil
+func ErrorClusterConfigure(out string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrClusterConfigure,
+		Message: out,
+		NoPrint: true,
+	})
 }
 
-type Error struct {
-	Kind    ErrorKind
-	message string
+func ErrorClusterDebug(out string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrClusterDebug,
+		Message: out,
+		NoPrint: true,
+	})
 }
 
-func (e Error) Error() string {
-	return e.message
+func ErrorClusterRefresh(out string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrClusterRefresh,
+		Message: out,
+		NoPrint: true,
+	})
 }
 
-func ErrorCliAlreadyInAppDir(dirPath string) error {
-	return Error{
-		Kind:    ErrCliAlreadyInAppDir,
-		message: fmt.Sprintf("your current working directory is already in a cortex directory (%s)", dirPath),
+func ErrorClusterDown(out string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrClusterDown,
+		Message: out,
+		NoPrint: true,
+	})
+}
+
+func ErrorSpecifyAtLeastOneFlag(flagsToSpecify ...string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrSpecifyAtLeastOneFlag,
+		Message: fmt.Sprintf("must specify at least one of the following flags: %s", s.StrsOr(flagsToSpecify)),
+	})
+}
+
+func ErrorMinInstancesLowerThan(minValue int64) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrMinInstancesLowerThan,
+		Message: fmt.Sprintf("min instances cannot be set to a value lower than %d", minValue),
+	})
+}
+
+func ErrorMaxInstancesLowerThan(minValue int64) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrMaxInstancesLowerThan,
+		Message: fmt.Sprintf("max instances cannot be set to a value lower than %d", minValue),
+	})
+}
+
+func ErrorMinInstancesGreaterThanMaxInstances(minInstances, maxInstances int64) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrMinInstancesGreaterThanMaxInstances,
+		Message: fmt.Sprintf("min instances (%d) cannot be set to a value higher than max instances (%d)", minInstances, maxInstances),
+	})
+}
+
+func ErrorNodeGroupNotFound(scalingNodeGroupName, clusterName, clusterRegion string, availableNodeGroups []string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrNodeGroupNotFound,
+		Message: fmt.Sprintf("nodegroup %s couldn't be found in the cluster named %s in region %s; the available nodegroups for this cluster are: %s", scalingNodeGroupName, clusterName, clusterRegion, s.StrsAnd(availableNodeGroups)),
+	})
+}
+
+func ErrorMutuallyExclusiveFlags(flagA, flagB string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrMutuallyExclusiveFlags,
+		Message: fmt.Sprintf("flags %s and %s cannot be used at the same time", flagA, flagB),
+	})
+}
+
+func ErrorClusterAccessConfigRequired(cliFlagsOnly bool) error {
+	message := ""
+	if cliFlagsOnly {
+		message = "please provide the name and region of the cluster using the CLI flags (e.g. via `--name` and `--region`)"
+	} else {
+		message = fmt.Sprintf("please provide a cluster configuration file which specifies `%s` and `%s` (e.g. via `--config cluster.yaml`) or use the CLI flags to specify the cluster (e.g. via `--name` and `--region`)", clusterconfig.ClusterNameKey, clusterconfig.RegionKey)
 	}
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrClusterAccessConfigRequired,
+		Message: message,
+	})
 }
 
-func ErrorAPINotReady(apiName string, status string) error {
-	return Error{
-		Kind:    ErrAPINotReady,
-		message: fmt.Sprintf("api %s is %s", s.UserStr(apiName), status),
-	}
+func ErrorShellCompletionNotSupported(shell string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrShellCompletionNotSupported,
+		Message: fmt.Sprintf("shell completion for %s is not supported (only bash and zsh are supported)", shell),
+	})
 }
 
-func ErrorAPINotFound(apiName string) error {
-	return Error{
-		Kind:    ErrAPINotFound,
-		message: fmt.Sprintf("api %s not found", s.UserStr(apiName)),
-	}
+func ErrorNoTerminalWidth() error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrNoTerminalWidth,
+		Message: "unable to determine terminal width; please re-run the command without the `--watch` flag",
+	})
 }
 
-func ErrorFailedToConnect(urlStr string) error {
-	return Error{
-		Kind:    ErrFailedToConnect,
-		message: fmt.Sprintf("failed to connect to the operator (%s), run `cortex configure` if you need to update the operator URL", urlStr),
-	}
+func ErrorDeployFromTopLevelDir(genericDirName string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrDeployFromTopLevelDir,
+		Message: fmt.Sprintf("cannot deploy from your %s directory - when deploying your API, cortex sends all files in your project directory (i.e. the directory which contains cortex.yaml) to your cluster (see https://docs.cortexlabs.com/v/%s/); therefore it is recommended to create a subdirectory for your project files", genericDirName, consts.CortexVersionMinor),
+	})
 }
 
-func ErrorCliNotInAppDir() error {
-	return Error{
-		Kind:    ErrCliNotInAppDir,
-		message: "your current working directory is not in or under a cortex directory (identified via a top-level cortex.yaml file)",
-	}
+func ErrorAPINameMustBeProvided() error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrAPINameMustBeProvided,
+		Message: fmt.Sprintf("multiple apis listed; please specify the name of an api"),
+	})
+}
+
+func ErrorAPINotFoundInConfig(apiName string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrAPINotFoundInConfig,
+		Message: fmt.Sprintf("api '%s' not found in config", apiName),
+	})
+}
+
+func ErrorClusterUIDsLimitInBucket(bucket string) error {
+	return errors.WithStack(&errors.Error{
+		Kind:    ErrClusterUIDsLimitInBucket,
+		Message: fmt.Sprintf("detected too many top level folders in %s bucket; please empty your bucket and try again", bucket),
+	})
 }

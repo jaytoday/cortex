@@ -1,96 +1,53 @@
-<img src='https://s3-us-west-2.amazonaws.com/cortex-public/logo.png' height='88'>
+**[Docs](https://docs.cortexlabs.com)** • **[Slack](https://community.cortexlabs.com)**
 
 <br>
 
-**Get started:** [Install](https://docs.cortex.dev/install) • [Tutorial](https://docs.cortex.dev/tutorial) • <!-- CORTEX_VERSION_MINOR_STABLE e.g. https://docs.cortex.dev/v/0.2/ -->[Docs](https://docs.cortex.dev) • <!-- CORTEX_VERSION_MINOR_STABLE -->[Examples](https://github.com/cortexlabs/cortex/tree/0.7/examples)
-
-**Learn more:** [Website](https://cortex.dev) • [Blog](https://blog.cortex.dev) • [Subscribe](https://cortexlabs.us20.list-manage.com/subscribe?u=a1987373ab814f20961fd90b4&id=ae83491e1c) • [Contact](mailto:hello@cortex.dev)
+<img src='https://cortex-public.s3.us-west-2.amazonaws.com/logo.png' height='32'>
 
 <br>
 
-Cortex is a machine learning model deployment platform that runs in your AWS account. You define deployments with simple declarative configuration and Cortex deploys your models as JSON APIs. It also handles autoscaling, rolling updates, log streaming, inference on CPUs or GPUs, and more.
+Note: This project is no longer actively maintained by its original authors.
 
-Cortex is actively maintained by a venture-backed team of infrastructure engineers and [we're hiring](https://angel.co/cortex-labs-inc/jobs).
+# Production infrastructure for machine learning at scale
 
-<br>
-
-## How it works
-
-**Define** your deployment using declarative configuration:
-
-```yaml
-# cortex.yaml
-
-- kind: api
-  name: my-api
-  model: s3://my-bucket/my-model.zip
-  request_handler: handler.py
-  compute:
-    min_replicas: 5
-    max_replicas: 20
-```
-
-**Customize** request handling (optional):
-
-```python
-# handler.py
-
-def pre_inference(sample, metadata):
-  # Python code
-
-
-def post_inference(prediction, metadata):
-  # Python code
-```
-
-**Deploy** to your cloud infrastructure:
-
-```bash
-$ cortex deploy
-
-Deploying ...
-https://amazonaws.com/my-api  # Your API is ready!
-```
-
-**Serve** real time predictions via scalable JSON APIs:
-
-```bash
-$ curl -d '{"a": 1, "b": 2, "c": 3}' https://amazonaws.com/my-api
-
-{ prediction: "def" }
-```
+Deploy, manage, and scale machine learning models in production.
 
 <br>
 
-## Spinning up a Cortex cluster on your AWS account
+## Serverless workloads
 
-```bash
-# Download the install script
-$ curl -O https://raw.githubusercontent.com/cortexlabs/cortex/master/cortex.sh && chmod +x cortex.sh
+**Realtime** - respond to requests in real-time and autoscale based on in-flight request volumes.
 
-# Set your AWS credentials
-$ export AWS_ACCESS_KEY_ID=***
-$ export AWS_SECRET_ACCESS_KEY=***
+**Async** - process requests asynchronously and autoscale based on request queue length.
 
-# Provision infrastructure on AWS and install Cortex
-$ ./cortex.sh install
-
-# Install the Cortex CLI on your machine
-$ ./cortex.sh install cli
-```
+**Batch** - run distributed and fault-tolerant batch processing jobs on-demand.
 
 <br>
 
-## Key features
+## Automated cluster management
 
-- **Minimal declarative configuration:** Deployments can be defined in a single `cortex.yaml` file.
+**Autoscaling** - elastically scale clusters with CPU and GPU instances.
 
-- **Autoscaling:** Cortex can automatically scale APIs to handle production workloads.
+**Spot instances** - run workloads on spot instances with automated on-demand backups.
 
-- **Multi framework:** Cortex supports TensorFlow, Keras, PyTorch, Scikit-learn, XGBoost, and more.
+**Environments** - create multiple clusters with different configurations.
 
-- **Rolling updates:** Cortex updates deployed APIs without any downtime.
+<br>
 
-- **Log streaming:** Cortex streams logs from your deployed models to your CLI.
+## CI/CD and observability integrations
 
-- **CPU / GPU support:** Cortex can run inference on CPU or GPU infrastructure.
+**Provisioning** - provision clusters with declarative configuration or a Terraform provider.
+
+**Metrics** - send metrics to any monitoring tool or use pre-built Grafana dashboards.
+
+**Logs** - stream logs to any log management tool or use the pre-built CloudWatch integration.
+
+<br>
+
+## Built for AWS
+
+**EKS** - Cortex runs on top of EKS to scale workloads reliably and cost-effectively.
+
+**VPC** - deploy clusters into a VPC on your AWS account to keep your data private.
+
+**IAM** - integrate with IAM for authentication and authorization workflows.

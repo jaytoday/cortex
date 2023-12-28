@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,28 +18,54 @@ package configreader
 
 import (
 	"fmt"
-	"io/ioutil"
 	"strings"
 
+	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	"github.com/cortexlabs/cortex/pkg/lib/regex"
 	"github.com/cortexlabs/cortex/pkg/lib/slices"
+	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 	"github.com/cortexlabs/cortex/pkg/lib/urls"
 )
 
 type StringValidation struct {
 	Required                             bool
 	Default                              string
-	AllowEmpty                           bool
+	AllowEmpty                           bool // Allow `<field>: ""`
+	TreatNullAsEmpty                     bool // `<field>: ` and `<field>: null` will be read as `<field>: ""`
 	AllowedValues                        []string
+	HiddenAllowedValues                  []string // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues                     []string
+	CantBeSpecifiedErrStr                *string
 	Prefix                               string
+	Suffix                               string
+	InvalidPrefixes                      []string
+	InvalidSuffixes                      []string
+	AllowedPrefixes                      []string
+	AllowedSuffixes                      []string
+	MaxLength                            int
+	MinLength                            int
+	DisallowLeadingWhitespace            bool
+	DisallowTrailingWhitespace           bool
 	AlphaNumericDashDotUnderscoreOrEmpty bool
 	AlphaNumericDashDotUnderscore        bool
+	AlphaNumericDashUnderscoreOrEmpty    bool
 	AlphaNumericDashUnderscore           bool
+	AlphaNumericDotUnderscore            bool
+	AlphaNumericDash                     bool
+	AWSTag                               bool
 	DNS1035                              bool
 	DNS1123                              bool
+	CastInt                              bool
+	CastNumeric                          bool
+	CastScalar                           bool
 	AllowCortexResources                 bool
 	RequireCortexResources               bool
+	DockerImage                          bool
+	DockerImageOrEmpty                   bool
 	Validator                            func(string) (string, error)
 }
 
@@ -49,13 +75,33 @@ func EnvVar(envVarName string) string {
 
 func String(inter interface{}, v *StringValidation) (string, error) {
 	if inter == nil {
-		return "", ErrorCannotBeNull()
+		if v.TreatNullAsEmpty {
+			return ValidateStringProvided("", v)
+		}
+		return "", ErrorCannotBeNull(v.Required)
 	}
 	casted, castOk := inter.(string)
 	if !castOk {
-		return "", ErrorInvalidPrimitiveType(inter, PrimTypeString)
+		if v.CastScalar {
+			if !cast.IsScalarType(inter) {
+				return "", ErrorInvalidPrimitiveType(inter, PrimTypeString, PrimTypeInt, PrimTypeFloat, PrimTypeBool)
+			}
+			casted = s.ObjFlatNoQuotes(inter)
+		} else if v.CastNumeric {
+			if !cast.IsNumericType(inter) {
+				return "", ErrorInvalidPrimitiveType(inter, PrimTypeString, PrimTypeInt, PrimTypeFloat)
+			}
+			casted = s.ObjFlatNoQuotes(inter)
+		} else if v.CastInt {
+			if !cast.IsIntType(inter) {
+				return "", ErrorInvalidPrimitiveType(inter, PrimTypeString, PrimTypeInt)
+			}
+			casted = s.ObjFlatNoQuotes(inter)
+		} else {
+			return "", ErrorInvalidPrimitiveType(inter, PrimTypeString)
+		}
 	}
-	return ValidateString(casted, v)
+	return ValidateStringProvided(casted, v)
 }
 
 func StringFromInterfaceMap(key string, iMap map[string]interface{}, v *StringValidation) (string, error) {
@@ -91,7 +137,7 @@ func StringFromStrMap(key string, sMap map[string]string, v *StringValidation) (
 }
 
 func StringFromStr(valStr string, v *StringValidation) (string, error) {
-	return ValidateString(valStr, v)
+	return ValidateStringProvided(valStr, v)
 }
 
 func StringFromEnv(envVarName string, v *StringValidation) (string, error) {
@@ -111,15 +157,26 @@ func StringFromEnv(envVarName string, v *StringValidation) (string, error) {
 }
 
 func StringFromFile(filePath string, v *StringValidation) (string, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil {
+	if !files.IsFile(filePath) {
 		val, err := ValidateStringMissing(v)
 		if err != nil {
 			return "", errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateStringMissing(v)
+		if err != nil {
+			return "", errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := StringFromStr(valStr, v)
 	if err != nil {
 		return "", errors.Wrap(err, filePath)
@@ -135,9 +192,9 @@ func StringFromEnvOrFile(envVarName string, filePath string, v *StringValidation
 	return StringFromFile(filePath, v)
 }
 
-func StringFromPrompt(promptOpts *PromptOptions, v *StringValidation) (string, error) {
-	promptOpts.defaultStr = v.Default
-	valStr := prompt(promptOpts)
+func StringFromPrompt(promptOpts *prompt.Options, v *StringValidation) (string, error) {
+	promptOpts.DefaultStr = v.Default
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" { // Treat empty prompt value as missing
 		return ValidateStringMissing(v)
 	}
@@ -146,12 +203,19 @@ func StringFromPrompt(promptOpts *PromptOptions, v *StringValidation) (string, e
 
 func ValidateStringMissing(v *StringValidation) (string, error) {
 	if v.Required {
-		return "", ErrorMustBeDefined()
+		return "", ErrorMustBeDefined(v.AllowedValues)
 	}
-	return ValidateString(v.Default, v)
+	return validateString(v.Default, v)
 }
 
-func ValidateString(val string, v *StringValidation) (string, error) {
+func ValidateStringProvided(val string, v *StringValidation) (string, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return "", ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+	return validateString(val, v)
+}
+
+func validateString(val string, v *StringValidation) (string, error) {
 	err := ValidateStringVal(val, v)
 	if err != nil {
 		return "", err
@@ -180,15 +244,83 @@ func ValidateStringVal(val string, v *StringValidation) error {
 		}
 	}
 
-	if v.AllowedValues != nil {
-		if !slices.HasString(v.AllowedValues, val) {
-			return ErrorInvalidStr(val, v.AllowedValues...)
+	if len(v.AllowedValues) > 0 {
+		if !slices.HasString(append(v.AllowedValues, v.HiddenAllowedValues...), val) {
+			return ErrorInvalidStr(val, v.AllowedValues[0], v.AllowedValues[1:]...)
 		}
+	}
+
+	if len(v.DisallowedValues) > 0 {
+		if slices.HasString(v.DisallowedValues, val) {
+			return ErrorDisallowedValue(val)
+		}
+	}
+
+	if v.MaxLength > 0 && len(val) > v.MaxLength {
+		return ErrorTooLong(val, v.MaxLength)
+	}
+
+	if v.MinLength > 0 && len(val) < v.MinLength {
+		return ErrorTooShort(val, v.MinLength)
 	}
 
 	if v.Prefix != "" {
 		if !strings.HasPrefix(val, v.Prefix) {
 			return ErrorMustHavePrefix(val, v.Prefix)
+		}
+	}
+
+	if v.Suffix != "" {
+		if !strings.HasSuffix(val, v.Suffix) {
+			return ErrorMustHaveSuffix(val, v.Suffix)
+		}
+	}
+
+	for _, invalidPrefix := range v.InvalidPrefixes {
+		if strings.HasPrefix(val, invalidPrefix) {
+			return ErrorCantHavePrefix(val, invalidPrefix)
+		}
+	}
+
+	for _, invalidSuffix := range v.InvalidSuffixes {
+		if strings.HasSuffix(val, invalidSuffix) {
+			return ErrorCantHaveSuffix(val, invalidSuffix)
+		}
+	}
+
+	if len(v.AllowedPrefixes) > 0 {
+		matchedPrefixes := 0
+		for _, allowedPrefix := range v.AllowedPrefixes {
+			if strings.HasPrefix(val, allowedPrefix) {
+				matchedPrefixes++
+			}
+		}
+		if matchedPrefixes == 0 {
+			return ErrorMustHavePrefix(val, v.AllowedPrefixes[0], v.AllowedPrefixes[1:]...)
+		}
+	}
+
+	if len(v.AllowedSuffixes) > 0 {
+		matchedSuffixes := 0
+		for _, allowedSuffix := range v.AllowedSuffixes {
+			if strings.HasSuffix(val, allowedSuffix) {
+				matchedSuffixes++
+			}
+		}
+		if matchedSuffixes == 0 {
+			return ErrorMustHaveSuffix(val, v.AllowedSuffixes[0], v.AllowedSuffixes[1:]...)
+		}
+	}
+
+	if v.DisallowLeadingWhitespace {
+		if regex.HasLeadingWhitespace(val) {
+			return ErrorLeadingWhitespace(val)
+		}
+	}
+
+	if v.DisallowTrailingWhitespace {
+		if regex.HasTrailingWhitespace(val) {
+			return ErrorTrailingWhitespace(val)
 		}
 	}
 
@@ -204,9 +336,45 @@ func ValidateStringVal(val string, v *StringValidation) error {
 		}
 	}
 
+	if v.AlphaNumericDotUnderscore {
+		if !regex.IsAlphaNumericDotUnderscore(val) {
+			return ErrorAlphaNumericDotUnderscore(val)
+		}
+	}
+
+	if v.AlphaNumericDash {
+		if !regex.IsAlphaNumericDash(val) {
+			return ErrorAlphaNumericDash(val)
+		}
+	}
+
+	if v.AlphaNumericDashUnderscoreOrEmpty {
+		if !regex.IsAlphaNumericDashUnderscore(val) && val != "" {
+			return ErrorAlphaNumericDashUnderscore(val)
+		}
+	}
+
 	if v.AlphaNumericDashDotUnderscoreOrEmpty {
 		if !regex.IsAlphaNumericDashDotUnderscore(val) && val != "" {
 			return ErrorAlphaNumericDashDotUnderscore(val)
+		}
+	}
+
+	if v.AWSTag {
+		if !regex.IsValidAWSTag(val) && val != "" {
+			return ErrorInvalidAWSTag(val)
+		}
+	}
+
+	if v.DockerImage {
+		if !regex.IsValidDockerImage(val) {
+			return ErrorInvalidDockerImage(val)
+		}
+	}
+
+	if v.DockerImageOrEmpty {
+		if !regex.IsValidDockerImage(val) && val != "" {
+			return ErrorInvalidDockerImage(val)
 		}
 	}
 
@@ -232,7 +400,7 @@ func ValidateStringVal(val string, v *StringValidation) error {
 func MustStringFromEnv(envVarName string, v *StringValidation) string {
 	val, err := StringFromEnv(envVarName, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -240,7 +408,7 @@ func MustStringFromEnv(envVarName string, v *StringValidation) string {
 func MustStringFromFile(filePath string, v *StringValidation) string {
 	val, err := StringFromFile(filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -248,7 +416,7 @@ func MustStringFromFile(filePath string, v *StringValidation) string {
 func MustStringFromEnvOrFile(envVarName string, filePath string, v *StringValidation) string {
 	val, err := StringFromEnvOrFile(envVarName, filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -26,6 +26,11 @@ type InterfaceMapListValidation struct {
 	Default                []map[string]interface{}
 	AllowExplicitNull      bool
 	AllowEmpty             bool
+	CantBeSpecifiedErrStr  *string
+	CastSingleItem         bool
+	MinLength              int
+	MaxLength              int
+	InvalidLengths         []int
 	AllowCortexResources   bool
 	RequireCortexResources bool
 	Validator              func([]map[string]interface{}) ([]map[string]interface{}, error)
@@ -34,7 +39,15 @@ type InterfaceMapListValidation struct {
 func InterfaceMapList(inter interface{}, v *InterfaceMapListValidation) ([]map[string]interface{}, error) {
 	casted, castOk := cast.InterfaceToStrInterfaceMapSlice(inter)
 	if !castOk {
-		return nil, ErrorInvalidPrimitiveType(inter, PrimTypeMapList)
+		if v.CastSingleItem {
+			castedItem, castOk := cast.InterfaceToStrInterfaceMap(inter)
+			if !castOk {
+				return nil, ErrorInvalidPrimitiveType(inter, PrimTypeMap, PrimTypeMapList)
+			}
+			casted = []map[string]interface{}{castedItem}
+		} else {
+			return nil, ErrorInvalidPrimitiveType(inter, PrimTypeMapList)
+		}
 	}
 	return ValidateInterfaceMapListProvided(casted, v)
 }
@@ -63,8 +76,12 @@ func ValidateInterfaceMapListMissing(v *InterfaceMapListValidation) ([]map[strin
 }
 
 func ValidateInterfaceMapListProvided(val []map[string]interface{}, v *InterfaceMapListValidation) ([]map[string]interface{}, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return validateInterfaceMapList(val, v)
 }
@@ -83,6 +100,24 @@ func validateInterfaceMapList(val []map[string]interface{}, v *InterfaceMapListV
 	if !v.AllowEmpty {
 		if val != nil && len(val) == 0 {
 			return nil, ErrorCannotBeEmpty()
+		}
+	}
+
+	if v.MinLength != 0 {
+		if len(val) < v.MinLength {
+			return nil, ErrorTooFewElements(v.MinLength)
+		}
+	}
+
+	if v.MaxLength != 0 {
+		if len(val) > v.MaxLength {
+			return nil, ErrorTooManyElements(v.MaxLength)
+		}
+	}
+
+	for _, invalidLength := range v.InvalidLengths {
+		if len(val) == invalidLength {
+			return nil, ErrorWrongNumberOfElements(v.InvalidLengths)
 		}
 	}
 

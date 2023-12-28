@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -177,13 +177,29 @@ func TestListDirRecursive(t *testing.T) {
 		filepath.Join(tmpDir, "3/1.py"),
 		filepath.Join(tmpDir, "3/2/1.py"),
 		filepath.Join(tmpDir, "3/2/2.txt"),
+		filepath.Join(tmpDir, "3/2/4.md"),
 		filepath.Join(tmpDir, "3/2/3/.tmp"),
 		filepath.Join(tmpDir, "4/1.yaml"),
 		filepath.Join(tmpDir, "4/2.pyc"),
+		filepath.Join(tmpDir, "4/3.md"),
 		filepath.Join(tmpDir, "4/.git/HEAD"),
+		filepath.Join(tmpDir, "README.md"),
+		filepath.Join(tmpDir, ".ignore"),
 	}
 
-	err = MakeEmptyFiles(filesList...)
+	ignoreContents := `
+*.md
+*.txt
+4/.git
+3/2/1.py
+!README.md
+  `
+	WriteFile([]byte(ignoreContents), filepath.Join(tmpDir, ".ignore"))
+
+	ignoreFn, err := GitIgnoreFn(filepath.Join(tmpDir, ".ignore"))
+	require.NoError(t, err)
+
+	err = MakeEmptyFiles(filesList[0], filesList[1:]...)
 	require.NoError(t, err)
 
 	var filesListRecursive []string
@@ -200,9 +216,12 @@ func TestListDirRecursive(t *testing.T) {
 		filepath.Join(tmpDir, "3/1.py"),
 		filepath.Join(tmpDir, "3/2/1.py"),
 		filepath.Join(tmpDir, "3/2/2.txt"),
+		filepath.Join(tmpDir, "3/2/4.md"),
 		filepath.Join(tmpDir, "4/1.yaml"),
 		filepath.Join(tmpDir, "4/2.pyc"),
+		filepath.Join(tmpDir, "4/3.md"),
 		filepath.Join(tmpDir, "4/.git/HEAD"),
+		filepath.Join(tmpDir, "README.md"),
 	}
 	require.NoError(t, err)
 	require.ElementsMatch(t, expected, filesListRecursive)
@@ -214,8 +233,11 @@ func TestListDirRecursive(t *testing.T) {
 		filepath.Join(tmpDir, "3/1.py"),
 		filepath.Join(tmpDir, "3/2/1.py"),
 		filepath.Join(tmpDir, "3/2/2.txt"),
+		filepath.Join(tmpDir, "3/2/4.md"),
 		filepath.Join(tmpDir, "4/1.yaml"),
 		filepath.Join(tmpDir, "4/2.pyc"),
+		filepath.Join(tmpDir, "4/3.md"),
+		filepath.Join(tmpDir, "README.md"),
 	}
 	require.NoError(t, err)
 	require.ElementsMatch(t, expected, filesListRecursive)
@@ -225,7 +247,9 @@ func TestListDirRecursive(t *testing.T) {
 		filepath.Join(tmpDir, "1.txt"),
 		filepath.Join(tmpDir, "2.py"),
 		filepath.Join(tmpDir, "4/1.yaml"),
+		filepath.Join(tmpDir, "4/3.md"),
 		filepath.Join(tmpDir, "4/.git/HEAD"),
+		filepath.Join(tmpDir, "README.md"),
 	}
 	require.NoError(t, err)
 	require.ElementsMatch(t, expected, filesListRecursive)
@@ -244,6 +268,19 @@ func TestListDirRecursive(t *testing.T) {
 		filepath.Join("2.py"),
 		filepath.Join("3/1.py"),
 		filepath.Join("3/2/1.py"),
+	}
+	require.NoError(t, err)
+	require.ElementsMatch(t, expected, filesListRecursive)
+
+	filesListRecursive, err = ListDirRecursive(tmpDir, true, ignoreFn)
+	expected = []string{
+		"2.py",
+		"3/1.py",
+		"3/2/3/.tmp",
+		"4/1.yaml",
+		"4/2.pyc",
+		"README.md",
+		".ignore",
 	}
 	require.NoError(t, err)
 	require.ElementsMatch(t, expected, filesListRecursive)

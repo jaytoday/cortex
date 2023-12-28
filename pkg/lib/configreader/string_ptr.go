@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,38 +17,79 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
-
+	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
+	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type StringPtrValidation struct {
-	Required                      bool
-	Default                       *string
-	AllowExplicitNull             bool
-	AllowEmpty                    bool
-	AllowedValues                 []string
-	Prefix                        string
-	AlphaNumericDashDotUnderscore bool
-	AlphaNumericDashUnderscore    bool
-	DNS1035                       bool
-	DNS1123                       bool
-	AllowCortexResources          bool
-	RequireCortexResources        bool
-	Validator                     func(string) (string, error)
+	Required                             bool
+	Default                              *string
+	AllowExplicitNull                    bool
+	AllowEmpty                           bool
+	AllowedValues                        []string
+	HiddenAllowedValues                  []string // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues                     []string
+	CantBeSpecifiedErrStr                *string
+	Prefix                               string
+	Suffix                               string
+	InvalidPrefixes                      []string
+	InvalidSuffixes                      []string
+	AllowedPrefixes                      []string
+	AllowedSuffixes                      []string
+	MaxLength                            int
+	MinLength                            int
+	DisallowLeadingWhitespace            bool
+	DisallowTrailingWhitespace           bool
+	AlphaNumericDashDotUnderscoreOrEmpty bool
+	AlphaNumericDashDotUnderscore        bool
+	AlphaNumericDashUnderscore           bool
+	AlphaNumericDotUnderscore            bool
+	AWSTag                               bool
+	DNS1035                              bool
+	DNS1123                              bool
+	CastInt                              bool
+	CastNumeric                          bool
+	CastScalar                           bool
+	AllowCortexResources                 bool
+	RequireCortexResources               bool
+	DockerImage                          bool
+	DockerImageOrEmpty                   bool
+	Validator                            func(string) (string, error)
 }
 
 func makeStringValValidation(v *StringPtrValidation) *StringValidation {
 	return &StringValidation{
-		AllowEmpty:                    v.AllowEmpty,
-		AllowedValues:                 v.AllowedValues,
-		Prefix:                        v.Prefix,
-		AlphaNumericDashDotUnderscore: v.AlphaNumericDashDotUnderscore,
-		AlphaNumericDashUnderscore:    v.AlphaNumericDashUnderscore,
-		DNS1035:                       v.DNS1035,
-		DNS1123:                       v.DNS1123,
-		AllowCortexResources:          v.AllowCortexResources,
-		RequireCortexResources:        v.RequireCortexResources,
+		AllowEmpty:                           v.AllowEmpty,
+		AllowedValues:                        v.AllowedValues,
+		HiddenAllowedValues:                  v.HiddenAllowedValues,
+		DisallowedValues:                     v.DisallowedValues,
+		Prefix:                               v.Prefix,
+		Suffix:                               v.Suffix,
+		InvalidPrefixes:                      v.InvalidPrefixes,
+		InvalidSuffixes:                      v.InvalidSuffixes,
+		AllowedPrefixes:                      v.AllowedPrefixes,
+		AllowedSuffixes:                      v.AllowedSuffixes,
+		MaxLength:                            v.MaxLength,
+		MinLength:                            v.MinLength,
+		DisallowLeadingWhitespace:            v.DisallowLeadingWhitespace,
+		DisallowTrailingWhitespace:           v.DisallowTrailingWhitespace,
+		AlphaNumericDashDotUnderscoreOrEmpty: v.AlphaNumericDashDotUnderscoreOrEmpty,
+		AlphaNumericDashDotUnderscore:        v.AlphaNumericDashDotUnderscore,
+		AlphaNumericDashUnderscore:           v.AlphaNumericDashUnderscore,
+		AlphaNumericDotUnderscore:            v.AlphaNumericDotUnderscore,
+		AWSTag:                               v.AWSTag,
+		DNS1035:                              v.DNS1035,
+		DNS1123:                              v.DNS1123,
+		CastInt:                              v.CastInt,
+		CastNumeric:                          v.CastNumeric,
+		CastScalar:                           v.CastScalar,
+		AllowCortexResources:                 v.AllowCortexResources,
+		RequireCortexResources:               v.RequireCortexResources,
+		DockerImage:                          v.DockerImage,
+		DockerImageOrEmpty:                   v.DockerImageOrEmpty,
 	}
 }
 
@@ -58,8 +99,26 @@ func StringPtr(inter interface{}, v *StringPtrValidation) (*string, error) {
 	}
 	casted, castOk := inter.(string)
 	if !castOk {
-		return nil, ErrorInvalidPrimitiveType(inter, PrimTypeString)
+		if v.CastScalar {
+			if !cast.IsScalarType(inter) {
+				return nil, ErrorInvalidPrimitiveType(inter, PrimTypeString, PrimTypeInt, PrimTypeFloat, PrimTypeBool)
+			}
+			casted = s.ObjFlatNoQuotes(inter)
+		} else if v.CastNumeric {
+			if !cast.IsNumericType(inter) {
+				return nil, ErrorInvalidPrimitiveType(inter, PrimTypeString, PrimTypeInt, PrimTypeFloat)
+			}
+			casted = s.ObjFlatNoQuotes(inter)
+		} else if v.CastInt {
+			if !cast.IsIntType(inter) {
+				return nil, ErrorInvalidPrimitiveType(inter, PrimTypeString, PrimTypeInt)
+			}
+			casted = s.ObjFlatNoQuotes(inter)
+		} else {
+			return nil, ErrorInvalidPrimitiveType(inter, PrimTypeString)
+		}
 	}
+
 	return ValidateStringPtrProvided(&casted, v)
 }
 
@@ -116,15 +175,26 @@ func StringPtrFromEnv(envVarName string, v *StringPtrValidation) (*string, error
 }
 
 func StringPtrFromFile(filePath string, v *StringPtrValidation) (*string, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil {
+	if !files.IsFile(filePath) {
 		val, err := ValidateStringPtrMissing(v)
 		if err != nil {
 			return nil, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateStringPtrMissing(v)
+		if err != nil {
+			return nil, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := StringPtrFromStr(valStr, v)
 	if err != nil {
 		return nil, errors.Wrap(err, filePath)
@@ -140,24 +210,31 @@ func StringPtrFromEnvOrFile(envVarName string, filePath string, v *StringPtrVali
 	return StringPtrFromFile(filePath, v)
 }
 
-func StringPtrFromPrompt(promptOpts *PromptOptions, v *StringPtrValidation) (*string, error) {
-	valStr := prompt(promptOpts)
+func StringPtrFromPrompt(promptOpts *prompt.Options, v *StringPtrValidation) (*string, error) {
+	if v.Default != nil && promptOpts.DefaultStr == "" {
+		promptOpts.DefaultStr = *v.Default
+	}
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" { // Treat empty prompt value as missing
-		ValidateStringPtrMissing(v)
+		return ValidateStringPtrMissing(v)
 	}
 	return StringPtrFromStr(valStr, v)
 }
 
 func ValidateStringPtrMissing(v *StringPtrValidation) (*string, error) {
 	if v.Required {
-		return nil, ErrorMustBeDefined()
+		return nil, ErrorMustBeDefined(v.AllowedValues)
 	}
 	return validateStringPtr(v.Default, v)
 }
 
 func ValidateStringPtrProvided(val *string, v *StringPtrValidation) (*string, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return nil, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+
 	if !v.AllowExplicitNull && val == nil {
-		return nil, ErrorCannotBeNull()
+		return nil, ErrorCannotBeNull(v.Required)
 	}
 	return validateStringPtr(val, v)
 }

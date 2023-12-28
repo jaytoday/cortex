@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,48 +14,142 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+//go:generate python3 gen_resource_metadata.py
+//go:generate gofmt -s -w resource_metadata.go
+
 package aws
 
 import (
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/sts"
-
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
-	"github.com/cortexlabs/cortex/pkg/lib/hash"
 )
 
 type Client struct {
-	Region               string
-	Bucket               string
-	s3Client             *s3.S3
-	stsClient            *sts.STS
-	cloudWatchLogsClient *cloudwatchlogs.CloudWatchLogs
-	awsAccountID         string
-	HashedAccountID      string
+	Region          string
+	sess            *session.Session
+	IsAnonymous     bool
+	clients         clients
+	accountID       *string
+	hashedAccountID *string
 }
 
-func New(region, bucket string) *Client {
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region:     aws.String(region),
-		DisableSSL: aws.Bool(false),
+func NewForSession(sess *session.Session) (*Client, error) {
+	if sess.Config.Region == nil {
+		return nil, errors.ErrorUnexpected("session config is missing the Region field")
+	}
+
+	return &Client{
+		Region: *sess.Config.Region,
+		sess:   sess,
+	}, nil
+}
+
+func NewFromClientS3Path(s3Path string, awsClient *Client) (*Client, error) {
+	if !awsClient.IsAnonymous {
+		return NewFromS3Path(s3Path)
+	}
+
+	region, err := GetBucketRegionFromS3Path(s3Path)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewAnonymousClientWithRegion(region)
+}
+
+func NewFromS3Path(s3Path string) (*Client, error) {
+	bucket, _, err := SplitS3Path(s3Path)
+	if err != nil {
+		return nil, err
+	}
+	return NewFromS3Bucket(bucket)
+}
+
+func NewFromS3Bucket(bucket string) (*Client, error) {
+	region, err := GetBucketRegion(bucket)
+	if err != nil {
+		return nil, err
+	}
+	return NewForRegion(region)
+}
+
+func NewForRegion(region string) (*Client, error) {
+	sess, err := session.NewSessionWithOptions(session.Options{
+		Config: aws.Config{
+			Region: aws.String(region),
+		},
+		SharedConfigState: session.SharedConfigEnable,
+	})
+
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	if sess.Config.Credentials == nil {
+		return nil, ErrorUnableToFindCredentials()
+	}
+
+	creds, err := sess.Config.Credentials.Get()
+	if err != nil {
+		return nil, ErrorUnableToFindCredentials()
+	}
+
+	if creds.AccessKeyID == "" || creds.SecretAccessKey == "" {
+		return nil, ErrorUnexpectedMissingCredentials(creds.AccessKeyID, creds.SecretAccessKey)
+	}
+
+	return &Client{
+		sess:   sess,
+		Region: region,
+	}, nil
+}
+
+func New() (*Client, error) {
+	sess := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
 	}))
 
-	awsClient := &Client{
-		Bucket:               bucket,
-		Region:               region,
-		s3Client:             s3.New(sess),
-		stsClient:            sts.New(sess),
-		cloudWatchLogsClient: cloudwatchlogs.New(sess),
+	if sess.Config.Region == nil {
+		return nil, ErrorRegionNotConfigured()
 	}
-	response, err := awsClient.stsClient.GetCallerIdentity(nil)
-	if err != nil {
-		errors.Exit(err, ErrorAuth())
-	}
-	awsClient.awsAccountID = *response.Account
-	awsClient.HashedAccountID = hash.String(awsClient.awsAccountID)
 
-	return awsClient
+	if sess.Config.Credentials == nil {
+		return nil, ErrorUnableToFindCredentials()
+	}
+
+	creds, err := sess.Config.Credentials.Get()
+	if err != nil {
+		return nil, ErrorUnableToFindCredentials()
+	}
+
+	// make sure that credential exists
+	if creds.AccessKeyID == "" || creds.SecretAccessKey == "" {
+		return nil, ErrorUnexpectedMissingCredentials(creds.AccessKeyID, creds.SecretAccessKey)
+	}
+
+	return &Client{
+		sess:   sess,
+		Region: *sess.Config.Region,
+	}, nil
+}
+
+func NewAnonymousClientWithRegion(region string) (*Client, error) {
+	sess, err := session.NewSession(&aws.Config{
+		Credentials: credentials.AnonymousCredentials,
+		Region:      aws.String(region),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &Client{
+		sess:        sess,
+		Region:      region,
+		IsAnonymous: true,
+	}, nil
+}
+
+func (c Client) Session() *session.Session {
+	return c.sess
 }

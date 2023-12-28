@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,13 +24,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cortexlabs/yaml"
 )
-
-var emptyTime time.Time
-var timeType = reflect.ValueOf(emptyTime).Type()
 
 func Bool(val bool) string {
 	return strconv.FormatBool(val)
@@ -104,10 +100,10 @@ func Uintptr(val uintptr) string {
 	return fmt.Sprint(val)
 }
 
-func Round(val float64, decimalPlaces int, pad bool) string {
+func Round(val float64, decimalPlaces int, padToDecimalPlaces int) string {
 	rounded := math.Round(val*math.Pow10(decimalPlaces)) / math.Pow10(decimalPlaces)
 	str := strconv.FormatFloat(rounded, 'f', -1, 64)
-	if !pad || decimalPlaces == 0 {
+	if padToDecimalPlaces == 0 {
 		return str
 	}
 	split := strings.Split(str, ".")
@@ -116,8 +112,43 @@ func Round(val float64, decimalPlaces int, pad bool) string {
 	if len(split) > 1 {
 		decVal = split[1]
 	}
-	numZeros := decimalPlaces - len(decVal)
+	if len(decVal) >= padToDecimalPlaces {
+		return str
+	}
+	numZeros := padToDecimalPlaces - len(decVal)
 	return intVal + "." + decVal + strings.Repeat("0", numZeros)
+}
+
+// copied from https://yourbasic.org/golang/formatting-byte-size-to-human-readable-format/
+func IntToBase2Byte(size int) string {
+	return Int64ToBase2Byte(int64(size))
+}
+
+func Int64ToBase2Byte(size int64) string {
+	const unit int64 = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB",
+		float64(size)/float64(div), "KMGTPE"[exp])
+
+}
+
+func DollarsAndCents(val float64) string {
+	return "$" + Round(val, 2, 2)
+}
+
+func DollarsAndTenthsOfCents(val float64) string {
+	return "$" + Round(val, 3, 2)
+}
+
+func DollarsMaxPrecision(val float64) string {
+	return "$" + Round(val, 100, 2)
 }
 
 // This is similar to json.Marshal, but handles non-string keys (which we support). It should be valid YAML since we use it in templates
@@ -309,8 +340,20 @@ func strIndentValue(val reflect.Value, indent string, currentIndent string, newl
 	return "<hidden>"
 }
 
+func YesNo(val bool) string {
+	if val {
+		return "yes"
+	}
+	return "no"
+}
+
 func Obj(val interface{}) string {
 	return strIndent(val, "  ", "", "\n", `"`)
+}
+
+// Same as Obj(), but trim leading and trailing quotes if it's just a string
+func ObjStripped(val interface{}) string {
+	return TrimPrefixAndSuffix(Obj(val), `"`)
 }
 
 func ObjFlat(val interface{}) string {
@@ -347,6 +390,18 @@ func UserStrs(val interface{}) []string {
 		return nil
 	}
 
+	// Handle case where caller passed in a nested slice
+	if inVal.Len() == 1 {
+		if inVal.Index(0).Kind() == reflect.Slice {
+			inVal = inVal.Index(0)
+		} else if inVal.Index(0).Kind() == reflect.Interface { // Handle case where input is e.g. []interface{[]string{"test"}}
+			firstElementVal := reflect.ValueOf(inVal.Index(0).Interface())
+			if firstElementVal.Kind() == reflect.Slice {
+				inVal = firstElementVal
+			}
+		}
+	}
+
 	out := make([]string, inVal.Len())
 	for i := 0; i < inVal.Len(); i++ {
 		out[i] = UserStrValue(inVal.Index(i))
@@ -359,6 +414,10 @@ func Index(index int) string {
 }
 
 func Indent(str string, indent string) string {
+	if str == "" {
+		return indent
+	}
+
 	if str[len(str)-1:] == "\n" {
 		out := ""
 		for _, line := range strings.Split(str[:len(str)-1], "\n") {
@@ -372,4 +431,13 @@ func Indent(str string, indent string) string {
 		out += indent + line + "\n"
 	}
 	return out[:len(out)-1]
+}
+
+func TruncateEllipses(str string, maxLength int) string {
+	ellipses := " ..."
+	if len(str) > maxLength {
+		str = str[:maxLength-len(ellipses)]
+		str += ellipses
+	}
+	return str
 }

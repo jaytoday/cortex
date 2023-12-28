@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/cortexlabs/cortex/pkg/lib/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -346,7 +347,7 @@ type TypedConfig struct {
 	Typed `json:"typed"`
 }
 
-var interfaceStructValidation = &InterfaceStructValidation{
+var _interfaceStructValidation = &InterfaceStructValidation{
 	TypeKey: "type",
 	InterfaceStructTypes: map[string]*InterfaceStructType{
 		"type1": {
@@ -382,7 +383,7 @@ var interfaceStructValidation = &InterfaceStructValidation{
 	},
 }
 
-var interfaceStructValidationWithTypeKeyConfig = &InterfaceStructValidation{
+var _interfaceStructValidationWithTypeKeyConfig = &InterfaceStructValidation{
 	TypeKey:         "type",
 	TypeStructField: "Type",
 	InterfaceStructTypes: map[string]*InterfaceStructType{
@@ -425,7 +426,7 @@ func TestInterface(t *testing.T) {
 			{
 				// Key:         "typed",
 				StructField:               "Typed",
-				InterfaceStructValidation: interfaceStructValidation,
+				InterfaceStructValidation: _interfaceStructValidation,
 			},
 		},
 	}
@@ -468,7 +469,7 @@ func TestInterface(t *testing.T) {
 			{
 				// Key:         "typed",
 				StructField:               "Typed",
-				InterfaceStructValidation: interfaceStructValidationWithTypeKeyConfig,
+				InterfaceStructValidation: _interfaceStructValidationWithTypeKeyConfig,
 			},
 		},
 	}
@@ -504,7 +505,7 @@ func TestInterfaceList(t *testing.T) {
 				// Key:         "typeds",
 				StructField: "Typeds",
 				InterfaceStructListValidation: &InterfaceStructListValidation{
-					InterfaceStructValidation: interfaceStructValidation,
+					InterfaceStructValidation: _interfaceStructValidation,
 				},
 			},
 		},
@@ -559,7 +560,7 @@ func TestInterfaceList(t *testing.T) {
 				// Key:         "typeds",
 				StructField: "Typeds",
 				InterfaceStructListValidation: &InterfaceStructListValidation{
-					InterfaceStructValidation: interfaceStructValidationWithTypeKeyConfig,
+					InterfaceStructValidation: _interfaceStructValidationWithTypeKeyConfig,
 				},
 			},
 		},
@@ -911,10 +912,10 @@ func TestDefaultField(t *testing.T) {
 				StringValidation: &StringValidation{},
 			},
 			{
-				StructField:  "Key3",
-				DefaultField: "Key2",
-				DefaultFieldFunc: func(val interface{}) interface{} {
-					return val.(string) + ".py"
+				StructField:            "Key3",
+				DefaultDependentFields: []string{"Key2"},
+				DefaultDependentFieldsFunc: func(vals []interface{}) interface{} {
+					return vals[0].(string) + ".py"
 				},
 				StringValidation: &StringValidation{},
 			},
@@ -944,10 +945,10 @@ func TestDefaultField(t *testing.T) {
 				StringValidation: &StringValidation{},
 			},
 			{
-				StructField:  "Key3",
-				DefaultField: "Key1",
-				DefaultFieldFunc: func(val interface{}) interface{} {
-					if val.(bool) {
+				StructField:            "Key3",
+				DefaultDependentFields: []string{"Key1"},
+				DefaultDependentFieldsFunc: func(vals []interface{}) interface{} {
+					if vals[0].(bool) {
 						return "It was true"
 					}
 					return "It was false"
@@ -980,10 +981,10 @@ func TestDefaultField(t *testing.T) {
 				StringValidation: &StringValidation{},
 			},
 			{
-				StructField:  "Key1",
-				DefaultField: "Key2",
-				DefaultFieldFunc: func(val interface{}) interface{} {
-					if val.(string) == "key2" {
+				StructField:            "Key1",
+				DefaultDependentFields: []string{"Key2"},
+				DefaultDependentFieldsFunc: func(vals []interface{}) interface{} {
+					if vals[0].(string) == "key2" {
 						return true
 					}
 					return false
@@ -1025,7 +1026,7 @@ func testConfig(structValidation *StructValidation, configData interface{}, expe
 
 	if errs != nil {
 		for _, err := range errs {
-			fmt.Println("ERROR: " + err.Error())
+			fmt.Println("ERROR: " + errors.Message(err))
 		}
 	}
 	require.Empty(t, errs)

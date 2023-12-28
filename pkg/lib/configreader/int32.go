@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,34 +17,42 @@ limitations under the License.
 package configreader
 
 import (
-	"io/ioutil"
-
 	"github.com/cortexlabs/cortex/pkg/lib/cast"
 	"github.com/cortexlabs/cortex/pkg/lib/errors"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/files"
+	"github.com/cortexlabs/cortex/pkg/lib/prompt"
 	"github.com/cortexlabs/cortex/pkg/lib/slices"
 	s "github.com/cortexlabs/cortex/pkg/lib/strings"
 )
 
 type Int32Validation struct {
-	Required             bool
-	Default              int32
-	AllowedValues        []int32
-	GreaterThan          *int32
-	GreaterThanOrEqualTo *int32
-	LessThan             *int32
-	LessThanOrEqualTo    *int32
-	Validator            func(int32) (int32, error)
+	Required              bool
+	Default               int32
+	TreatNullAsZero       bool // `<field>: ` and `<field>: null` will be read as `<field>: 0`
+	AllowedValues         []int32
+	HiddenAllowedValues   []int32 // allowed, but will not be listed as valid values (must be used in conjunction with AllowedValues)
+	DisallowedValues      []int32
+	CantBeSpecifiedErrStr *string
+	GreaterThan           *int32
+	GreaterThanOrEqualTo  *int32
+	LessThan              *int32
+	LessThanOrEqualTo     *int32
+	Validator             func(int32) (int32, error)
 }
 
 func Int32(inter interface{}, v *Int32Validation) (int32, error) {
 	if inter == nil {
-		return 0, ErrorCannotBeNull()
+		if v.TreatNullAsZero {
+			return ValidateInt32Provided(0, v)
+		}
+		return 0, ErrorCannotBeNull(v.Required)
 	}
 	casted, castOk := cast.InterfaceToInt32(inter)
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(inter, PrimTypeInt)
 	}
-	return ValidateInt32(casted, v)
+	return ValidateInt32Provided(casted, v)
 }
 
 func Int32FromInterfaceMap(key string, iMap map[string]interface{}, v *Int32Validation) (int32, error) {
@@ -87,7 +95,7 @@ func Int32FromStr(valStr string, v *Int32Validation) (int32, error) {
 	if !castOk {
 		return 0, ErrorInvalidPrimitiveType(valStr, PrimTypeInt)
 	}
-	return ValidateInt32(casted, v)
+	return ValidateInt32Provided(casted, v)
 }
 
 func Int32FromEnv(envVarName string, v *Int32Validation) (int32, error) {
@@ -107,15 +115,26 @@ func Int32FromEnv(envVarName string, v *Int32Validation) (int32, error) {
 }
 
 func Int32FromFile(filePath string, v *Int32Validation) (int32, error) {
-	valBytes, err := ioutil.ReadFile(filePath)
-	if err != nil || len(valBytes) == 0 {
+	if !files.IsFile(filePath) {
 		val, err := ValidateInt32Missing(v)
 		if err != nil {
 			return 0, errors.Wrap(err, filePath)
 		}
 		return val, nil
 	}
-	valStr := string(valBytes)
+
+	valStr, err := files.ReadFile(filePath)
+	if err != nil {
+		return 0, err
+	}
+	if len(valStr) == 0 {
+		val, err := ValidateInt32Missing(v)
+		if err != nil {
+			return 0, errors.Wrap(err, filePath)
+		}
+		return val, nil
+	}
+
 	val, err := Int32FromStr(valStr, v)
 	if err != nil {
 		return 0, errors.Wrap(err, filePath)
@@ -131,9 +150,9 @@ func Int32FromEnvOrFile(envVarName string, filePath string, v *Int32Validation) 
 	return Int32FromFile(filePath, v)
 }
 
-func Int32FromPrompt(promptOpts *PromptOptions, v *Int32Validation) (int32, error) {
-	promptOpts.defaultStr = s.Int32(v.Default)
-	valStr := prompt(promptOpts)
+func Int32FromPrompt(promptOpts *prompt.Options, v *Int32Validation) (int32, error) {
+	promptOpts.DefaultStr = s.Int32(v.Default)
+	valStr := prompt.Prompt(promptOpts)
 	if valStr == "" {
 		return ValidateInt32Missing(v)
 	}
@@ -142,12 +161,19 @@ func Int32FromPrompt(promptOpts *PromptOptions, v *Int32Validation) (int32, erro
 
 func ValidateInt32Missing(v *Int32Validation) (int32, error) {
 	if v.Required {
-		return 0, ErrorMustBeDefined()
+		return 0, ErrorMustBeDefined(v.AllowedValues)
 	}
-	return ValidateInt32(v.Default, v)
+	return validateInt32(v.Default, v)
 }
 
-func ValidateInt32(val int32, v *Int32Validation) (int32, error) {
+func ValidateInt32Provided(val int32, v *Int32Validation) (int32, error) {
+	if v.CantBeSpecifiedErrStr != nil {
+		return 0, ErrorFieldCantBeSpecified(*v.CantBeSpecifiedErrStr)
+	}
+	return validateInt32(val, v)
+}
+
+func validateInt32(val int32, v *Int32Validation) (int32, error) {
 	err := ValidateInt32Val(val, v)
 	if err != nil {
 		return 0, err
@@ -181,9 +207,15 @@ func ValidateInt32Val(val int32, v *Int32Validation) error {
 		}
 	}
 
-	if v.AllowedValues != nil {
-		if !slices.HasInt32(v.AllowedValues, val) {
-			return ErrorInvalidInt32(val, v.AllowedValues...)
+	if len(v.AllowedValues) > 0 {
+		if !slices.HasInt32(append(v.AllowedValues, v.HiddenAllowedValues...), val) {
+			return ErrorInvalidInt32(val, v.AllowedValues[0], v.AllowedValues[1:]...)
+		}
+	}
+
+	if len(v.DisallowedValues) > 0 {
+		if slices.HasInt32(v.DisallowedValues, val) {
+			return ErrorDisallowedValue(val)
 		}
 	}
 
@@ -197,7 +229,7 @@ func ValidateInt32Val(val int32, v *Int32Validation) error {
 func MustInt32FromEnv(envVarName string, v *Int32Validation) int32 {
 	val, err := Int32FromEnv(envVarName, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -205,7 +237,7 @@ func MustInt32FromEnv(envVarName string, v *Int32Validation) int32 {
 func MustInt32FromFile(filePath string, v *Int32Validation) int32 {
 	val, err := Int32FromFile(filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }
@@ -213,7 +245,7 @@ func MustInt32FromFile(filePath string, v *Int32Validation) int32 {
 func MustInt32FromEnvOrFile(envVarName string, filePath string, v *Int32Validation) int32 {
 	val, err := Int32FromEnvOrFile(envVarName, filePath, v)
 	if err != nil {
-		errors.Panic(err)
+		exit.Panic(err)
 	}
 	return val
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,51 +17,89 @@ limitations under the License.
 package cmd
 
 import (
-	"github.com/spf13/cobra"
+	"fmt"
 
-	"github.com/cortexlabs/cortex/pkg/lib/errors"
-	"github.com/cortexlabs/cortex/pkg/operator/api/resource"
+	"github.com/cortexlabs/cortex/cli/cluster"
+	"github.com/cortexlabs/cortex/pkg/lib/exit"
+	"github.com/cortexlabs/cortex/pkg/lib/telemetry"
+	"github.com/spf13/cobra"
 )
 
-func init() {
-	addAppNameFlag(logsCmd)
-	addEnvFlag(logsCmd)
-	addVerboseFlag(logsCmd)
-	// addResourceTypesToHelp(logsCmd)
+var (
+	_flagLogsEnv            string
+	_flagLogsDisallowPrompt bool
+	_flagRandomPod          bool
+	_logsOutput             = `Navigate to the link below and click "Run Query":
+
+%s
+
+NOTE: there may be 1-2 minutes of delay for the logs to show up in the results of CloudWatch Insight queries
+`
+)
+
+func logsInit() {
+	_logsCmd.Flags().SortFlags = false
+	_logsCmd.Flags().StringVarP(&_flagLogsEnv, "env", "e", "", "environment to use")
+	_logsCmd.Flags().BoolVarP(&_flagLogsDisallowPrompt, "yes", "y", false, "skip prompts")
+	_logsCmd.Flags().BoolVarP(&_flagRandomPod, "random-pod", "", false, "stream logs from a random pod")
 }
 
-var logsCmd = &cobra.Command{
-	Use:   "logs [RESOURCE_TYPE] RESOURCE_NAME",
-	Short: "get logs for a resource",
-	Long:  "Get logs for a resource.",
+var _logsCmd = &cobra.Command{
+	Use:   "logs API_NAME [JOB_ID]",
+	Short: "get the logs for a workload",
 	Args:  cobra.RangeArgs(1, 2),
 	Run: func(cmd *cobra.Command, args []string) {
-		resourceName, resourceTypeStr := "", ""
-		switch len(args) {
-		case 1:
-			resourceName = args[0]
-		case 2:
-			userResourceType := args[0]
-			resourceName = args[1]
+		envName, err := getEnvFromFlag(_flagLogsEnv)
+		if err != nil {
+			telemetry.Event("cli.logs")
+			exit.Error(err)
+		}
 
-			if userResourceType != "" {
-				resourceType, err := resource.VisibleResourceTypeFromPrefix(userResourceType)
+		env, err := ReadOrConfigureEnv(envName)
+		if err != nil {
+			telemetry.Event("cli.logs")
+			exit.Error(err)
+		}
+		telemetry.Event("cli.logs", map[string]interface{}{"env_name": env.Name, "random_pod": _flagRandomPod})
+
+		err = printEnvIfNotSpecified(env.Name, cmd)
+		if err != nil {
+			exit.Error(err)
+		}
+
+		operatorConfig := MustGetOperatorConfig(env.Name)
+		apiName := args[0]
+
+		if len(args) == 1 {
+			if _flagRandomPod {
+				err := cluster.StreamLogs(operatorConfig, apiName)
 				if err != nil {
-					errors.Exit(err)
+					exit.Error(err)
 				}
-
-				resourceTypeStr = resourceType.String()
+				return
 			}
+
+			logResponse, err := cluster.GetLogs(operatorConfig, apiName)
+			if err != nil {
+				exit.Error(err)
+			}
+			fmt.Printf(_logsOutput, logResponse.LogURL)
+			return
 		}
 
-		appName, err := AppNameFromFlagOrConfig()
-		if err != nil {
-			errors.Exit(err)
+		jobID := args[1]
+		if _flagRandomPod {
+			err := cluster.StreamJobLogs(operatorConfig, apiName, jobID)
+			if err != nil {
+				exit.Error(err)
+			}
+			return
 		}
 
-		err = StreamLogs(appName, resourceName, resourceTypeStr, flagVerbose)
+		logResponse, err := cluster.GetJobLogs(operatorConfig, apiName, jobID)
 		if err != nil {
-			errors.Exit(err)
+			exit.Error(err)
 		}
+		fmt.Printf(_logsOutput, logResponse.LogURL)
 	},
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2019 Cortex Labs, Inc.
+Copyright 2022 Cortex Labs, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,46 +17,98 @@ limitations under the License.
 package consts
 
 import (
-	"regexp"
+	"os"
+	"time"
+
+	kresource "k8s.io/apimachinery/pkg/api/resource"
 )
 
 var (
-	CortexVersion = "master" // CORTEX_VERSION
+	CortexVersion      = "master" // CORTEX_VERSION
+	CortexVersionMinor = "master" // CORTEX_VERSION_MINOR
 
-	TypeStrRegex         = regexp.MustCompile(`"(INT|FLOAT|STRING|BOOL)(_COLUMN)?(\|(INT|FLOAT|STRING|BOOL)(_COLUMN)?)*"`)
-	SingleTypeStrRegex   = regexp.MustCompile(`"(INT|FLOAT|STRING|BOOL)(_COLUMN)?"`)
-	CompoundTypeStrRegex = regexp.MustCompile(`"(INT|FLOAT|STRING|BOOL)(_COLUMN)?(\|(INT|FLOAT|STRING|BOOL)(_COLUMN)?)+"`)
+	DefaultNamespace    = "default"
+	KubeSystemNamespace = "kube-system"
+	IstioNamespace      = "istio-system"
+	PrometheusNamespace = "prometheus"
+	LoggingNamespace    = "logging"
 
-	ContextCacheDir    = "/mnt/context"
-	EmptyDirMountPath  = "/mnt"
-	EmptyDirVolumeName = "mnt"
+	DefaultMaxQueueLength = int64(100)
+	DefaultMaxConcurrency = int64(1)
 
-	CortexConfigPath = "/configs/cortex"
-	CortexConfigName = "cortex-config"
+	DefaultUserPodPortInt32 = int32(8080)
 
-	RequirementsTxt = "requirements.txt"
-	PackageDir      = "packages"
+	ProxyPortStr   = "8888"
+	ProxyPortInt32 = int32(8888)
 
-	AppsDir               = "apps"
-	APIsDir               = "apis"
-	DataDir               = "data"
-	RawDataDir            = "data_raw"
-	TrainingDataDir       = "data_training"
-	AggregatorsDir        = "aggregators"
-	AggregatesDir         = "aggregates"
-	TransformersDir       = "transformers"
-	EstimatorsDir         = "estimators"
-	PythonPackagesDir     = "python_packages"
-	RequestHandlersDir    = "request_handlers"
-	ModelsDir             = "models"
-	ConstantsDir          = "constants"
-	ContextsDir           = "contexts"
-	ResourceStatusesDir   = "resource_statuses"
-	WorkloadSpecsDir      = "workload_specs"
-	LogPrefixesDir        = "log_prefixes"
-	RawColumnsDir         = "raw_columns"
-	TransformedColumnsDir = "transformed_columns"
-	MetadataDir           = "metadata"
+	ActivatorName      = "activator"
+	ActivatorPortInt32 = int32(8000)
 
-	TelemetryURL = "https://telemetry.cortexlabs.dev"
+	AdminPortName  = "admin"
+	AdminPortStr   = "15000"
+	AdminPortInt32 = int32(15000)
+
+	AuthHeader = "X-Cortex-Authorization"
+
+	CortexProxyCPU    = kresource.MustParse("100m")
+	CortexProxyMem    = kresource.MustParse("100Mi")
+	CortexDequeuerCPU = kresource.MustParse("100m")
+	CortexDequeuerMem = kresource.MustParse("100Mi")
+
+	/*
+		CPU Pod Reservations:
+		- FluentBit 100
+		- NodeExporter 50 (it has two containers)
+		- KubeProxy 100
+		- AWS cni 10
+	*/
+	CortexCPUPodReserved = kresource.MustParse("260m")
+	/*
+		CPU Node Reservations:
+		- Reserved (150 + 150) see generate_eks.py for details
+	*/
+	CortexCPUK8sReserved = kresource.MustParse("300m")
+
+	/*
+		Memory Pod Reservations:
+		- FluentBit 150
+		- NodeExporter 200 (it has two containers)
+	*/
+	CortexMemPodReserved = kresource.MustParse("350Mi")
+	/*
+		Memory Node Reservations:
+		- Reserved (300 + 300 + 200) see generate_eks.py for details
+	*/
+	CortexMemK8sReserved = kresource.MustParse("800Mi")
+
+	DefaultInClusterConfigPath   = "/configs/cluster/cluster.yaml"
+	MaxBucketLifecycleRules      = 100
+	AsyncWorkloadsExpirationDays = int64(7)
+
+	ReservedContainerPorts = []int32{
+		ProxyPortInt32,
+		AdminPortInt32,
+	}
+	ReservedContainerNames = []string{
+		"dequeuer",
+		"proxy",
+	}
+
+	UserAgentKey             = "User-Agent"
+	KubeProbeUserAgentPrefix = "kube-probe/"
+
+	CortexAPINameHeader       = "X-Cortex-API-Name"
+	CortexTargetServiceHeader = "X-Cortex-Target-Service"
+	CortexProbeHeader         = "X-Cortex-Probe"
+	CortexOriginHeader        = "X-Cortex-Origin"
+	CortexQueueURLHeader      = "X-Cortex-Queue-URL"
+
+	WaitForReadyReplicasTimeout = 20 * time.Minute
 )
+
+func DefaultRegistry() string {
+	if registryOverride := os.Getenv("CORTEX_DEV_DEFAULT_IMAGE_REGISTRY"); registryOverride != "" {
+		return registryOverride
+	}
+	return "quay.io/cortexlabs"
+}
